@@ -1,0 +1,19 @@
+{
+  "short_name": "ExpressCart",
+  "name": "ExpressCart India • BYOD Cart Self-Checkout PWA",
+  "description": "Handlebar-mounted supermarket Scan & Go with entrance offline API cache, OLED Eco battery mode, Family Multi-Cart billing, and Reverse Guard Exit verification.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#09090B",
+  "background_color": "#FAFAFA",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "48x48 72x72 96x96 128x128 192x192 512x512",
+      "type": "image/x-icon",
+      "purpose": "any maskable"
+    }
+  ]
+}

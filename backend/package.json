@@ -1,0 +1,18 @@
+{
+  "name": "expresscart-india-backend",
+  "version": "1.0.0",
+  "description": "Dedicated Serverless & Node Backend API + PostgreSQL Database for ExpressCart India",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node server.mjs",
+    "deploy": "npx vercel --prod"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.2"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.3"
+  }
+}
+
