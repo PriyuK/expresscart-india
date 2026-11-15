@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   StyleSheet,
   Text,
@@ -7,1162 +7,1707 @@ import {
   TextInput,
   ScrollView,
   SafeAreaView,
+  Modal,
+  Platform,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import {
-  ShoppingBag,
-  ShieldCheck,
-  MapPin,
-  Lock,
-  ArrowRight,
-  Check,
-  QrCode,
-  ScanLine,
+  ChevronDown,
   ChevronRight,
-  UserCheck,
-  WifiOff,
-  RefreshCw,
+  User,
   Users,
+  Check,
+  Receipt,
   Wallet,
+  HelpCircle,
+  LogOut,
+  X,
   Navigation,
+  ScanLine,
+  Smartphone,
+  QrCode,
+  Lock,
+  WifiOff,
+  Moon,
+  Sun,
+  FileText,
 } from 'lucide-react-native';
 import { useCartStore } from '../store/useCartStore';
 import {
-  STORE_CATALOG,
-  QUICK_TEST_ITEMS,
   PILOT_STORE_BRANCHES,
+  CATALOG_BY_BARCODE,
+  calculateOfflinePromoDiscount,
 } from '../data/mockStoreCatalog';
-
-const GUARD_PIN = '1234';
+import {
+  ThemeColors,
+  getThemeColors,
+  FONTS,
+  TYPOGRAPHY,
+  SPACING,
+  RADIUS,
+  ICON,
+  TOUCH_TARGET,
+  getBrandMonogram,
+  getOfferDealLine,
+  formatCleanStoreName,
+} from '../theme/tokens';
 
 export default function LandingScreen() {
   const router = useRouter();
   const {
+    isDarkMode,
+    toggleDarkMode,
     userProfile,
+    logoutUser,
     activeStore,
     setActiveStore,
-    isCheckedIn,
     setCheckedIn,
-    lastCatalogSyncTime,
-    gpsAutoDetected,
+    catalogCache,
+    isOfflineDeadZone,
     syncStoreCatalogApi,
     familySession,
     startFamilySession,
     joinFamilySession,
     leaveFamilySession,
+    addItemByBarcode,
     getCombinedCartItems,
-    lastExitPass,
   } = useCartStore();
 
-  const [showPinEntry, setShowPinEntry] = useState(false);
-  const [pinInput, setPinInput] = useState('');
-  const [pinError, setPinError] = useState<string | null>(null);
+  const COLORS = getThemeColors(isDarkMode);
+  const styles = useMemo(() => createStyles(COLORS), [COLORS]);
+
+  const [isLoadingOffers, setIsLoadingOffers] = useState(false);
+  const [showAllOffers, setShowAllOffers] = useState(false);
+  const [showStorePicker, setShowStorePicker] = useState(false);
+  const [showProfileMenu, setShowProfileMenu] = useState(false);
+  const [showFamilySheet, setShowFamilySheet] = useState(false);
+  const [showHelpSheet, setShowHelpSheet] = useState(false);
   const [isSyncingGps, setIsSyncingGps] = useState(false);
   const [joinCodeInput, setJoinCodeInput] = useState('');
-  const [showJoinInput, setShowJoinInput] = useState(false);
+  const [browserOffline, setBrowserOffline] = useState(false);
+
+  // Mobile web viewport, overscroll background, 100dvh, and reduced-motion rules
+  useEffect(() => {
+    if (Platform.OS === 'web' && typeof document !== 'undefined') {
+      document.documentElement.style.backgroundColor = COLORS.pageBg;
+      document.body.style.backgroundColor = COLORS.pageBg;
+
+      let viewportMeta = document.querySelector(
+        'meta[name="viewport"]'
+      ) as HTMLMetaElement | null;
+      if (!viewportMeta) {
+        viewportMeta = document.createElement('meta');
+        viewportMeta.name = 'viewport';
+        document.head.appendChild(viewportMeta);
+      }
+      if (!viewportMeta.content.includes('viewport-fit=cover')) {
+        viewportMeta.content =
+          'width=device-width, initial-scale=1, shrink-to-fit=no, viewport-fit=cover';
+      }
+
+      const styleId = 'expresscart-mobile-web-rules';
+      let styleEl = document.getElementById(styleId) as HTMLStyleElement | null;
+      if (!styleEl) {
+        styleEl = document.createElement('style');
+        styleEl.id = styleId;
+        document.head.appendChild(styleEl);
+      }
+      styleEl.textContent = `
+        html, body, #root {
+          background-color: ${COLORS.pageBg} !important;
+          min-height: 100dvh;
+          overscroll-behavior-y: none;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          *, *::before, *::after {
+            animation-duration: 0.01ms !important;
+            animation-iteration-count: 1 !important;
+            transition-duration: 0.01ms !important;
+            scroll-behavior: auto !important;
+          }
+        }
+      `;
+
+      const updateOnline = () => setBrowserOffline(!window.navigator.onLine);
+      updateOnline();
+      window.addEventListener('online', updateOnline);
+      window.addEventListener('offline', updateOnline);
+      return () => {
+        window.removeEventListener('online', updateOnline);
+        window.removeEventListener('offline', updateOnline);
+      };
+    }
+  }, [COLORS.pageBg]);
+
+  const isOffline = isOfflineDeadZone || browserOffline;
+  const isSignedIn = Boolean(userProfile?.isVerified);
 
   const combinedItems = getCombinedCartItems();
   const totalItemsInCart = combinedItems.reduce((sum, i) => sum + i.quantity, 0);
-  const totalCartValue = combinedItems.reduce(
-    (sum, i) => sum + i.storePrice * i.quantity,
-    0
+
+  const totalCartSavings = useMemo(() => {
+    return combinedItems.reduce((sum, item) => {
+      const cat =
+        catalogCache.find((c) => c.barcode === item.barcode) ||
+        CATALOG_BY_BARCODE[item.barcode];
+      const mrpDiff = Math.max(0, (item.mrp - item.storePrice) * item.quantity);
+      const { promoDiscount } = calculateOfflinePromoDiscount(
+        {
+          storePrice: item.storePrice,
+          offerType: item.offerType || cat?.offerType,
+        },
+        item.quantity
+      );
+      return sum + mrpDiff + promoDiscount;
+    }, 0);
+  }, [combinedItems, catalogCache]);
+
+  const activeStoreBranch = PILOT_STORE_BRANCHES.find(
+    (b) => b.name === activeStore
   );
+  const hasStoreSelected = Boolean(activeStore && activeStore.trim().length > 0);
+
+  const storeHeaderLabel = hasStoreSelected
+    ? activeStoreBranch
+      ? formatCleanStoreName(activeStoreBranch.shortName, activeStoreBranch.name)
+      : formatCleanStoreName(undefined, activeStore)
+    : 'Choose a store';
+
+  // Show 5 offer cards + 1 bordered "See all offers >" tile = 6 tiles in 2-col grid (or all when expanded)
+  const featuredOffers = useMemo(() => {
+    const list = catalogCache || [];
+    return showAllOffers ? list : list.slice(0, 5);
+  }, [catalogCache, showAllOffers]);
+
+  const hasOffers = isLoadingOffers || featuredOffers.length > 0;
+
+  const userInitial =
+    isSignedIn && userProfile?.name
+      ? userProfile.name.trim().charAt(0).toUpperCase()
+      : null;
+
+  const ensureStoreCheckedIn = () => {
+    if (!hasStoreSelected) {
+      setActiveStore(PILOT_STORE_BRANCHES[0].name, false);
+    }
+    setCheckedIn(true);
+  };
 
   const handleStartShopping = () => {
-    setCheckedIn(true);
-    if (!userProfile?.isVerified) {
-      router.push('/auth');
+    if (!hasStoreSelected) {
+      setShowStorePicker(true);
       return;
     }
+    setCheckedIn(true);
     router.push('/shop');
+  };
+
+  const handleScanItems = () => {
+    ensureStoreCheckedIn();
+    router.push('/shop');
+  };
+
+  const handlePayWithUpi = () => {
+    ensureStoreCheckedIn();
+    router.push('/checkout');
+  };
+
+  const handleShowExitPass = () => {
+    ensureStoreCheckedIn();
+    router.push('/orders');
+  };
+
+  const handleSelectOffer = (barcode: string) => {
+    ensureStoreCheckedIn();
+    addItemByBarcode(barcode);
+    router.push('/shop');
+  };
+
+  const handleSelectStore = (storeName: string) => {
+    setIsLoadingOffers(true);
+    setActiveStore(storeName, false);
+    setCheckedIn(true);
+    setShowStorePicker(false);
+    setTimeout(() => {
+      setIsLoadingOffers(false);
+    }, 280);
   };
 
   const handleGpsAutoDetectAndSync = () => {
     setIsSyncingGps(true);
+    setIsLoadingOffers(true);
     setTimeout(() => {
       syncStoreCatalogApi();
       setActiveStore(PILOT_STORE_BRANCHES[0].name, true);
       setIsSyncingGps(false);
-    }, 350);
-  };
-
-  const handleGuardUnlock = () => {
-    if (pinInput.trim() === GUARD_PIN) {
-      setPinError(null);
-      setPinInput('');
-      setShowPinEntry(false);
-      router.push('/guard');
-    } else {
-      setPinError('Incorrect PIN. Use 1234 for pilot access.');
-    }
+      setShowStorePicker(false);
+      setIsLoadingOffers(false);
+    }, 320);
   };
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.pageRoot}>
+      {/* 1. Header strip (64px, white, bottom hairline, 16px side padding) */}
+      <View style={styles.headerStrip}>
+        <TouchableOpacity
+          style={styles.headerStoreButton}
+          onPress={() => setShowStorePicker(true)}
+          activeOpacity={0.7}
+          accessibilityRole="button"
+          accessibilityLabel="Select store branch"
+        >
+          <View style={styles.storeTitleRow}>
+            <Text style={styles.storeNameText} numberOfLines={1}>
+              {storeHeaderLabel}
+            </Text>
+            <ChevronDown
+              size={ICON.size}
+              color={COLORS.text}
+              strokeWidth={ICON.strokeWidth}
+            />
+          </View>
+
+          <View style={styles.storeSubRow}>
+            <View
+              style={[
+                styles.statusDot,
+                !hasStoreSelected && styles.statusDotMuted,
+              ]}
+            />
+            <Text style={styles.storeCaptionText} numberOfLines={1}>
+              {isOffline
+                ? 'Offline mode. Scans still work.'
+                : hasStoreSelected
+                ? 'Checked in · Works without signal'
+                : 'Select a store to start'}
+            </Text>
+          </View>
+        </TouchableOpacity>
+
+        <View style={styles.headerRightActions}>
+          <TouchableOpacity
+            style={styles.profileTouchTarget}
+            onPress={toggleDarkMode}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel={
+              isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'
+            }
+          >
+            <View style={styles.profileCircle}>
+              {isDarkMode ? (
+                <Sun
+                  size={ICON.size}
+                  color={COLORS.text}
+                  strokeWidth={ICON.strokeWidth}
+                />
+              ) : (
+                <Moon
+                  size={ICON.size}
+                  color={COLORS.text}
+                  strokeWidth={ICON.strokeWidth}
+                />
+              )}
+            </View>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.profileTouchTarget}
+            onPress={() => setShowProfileMenu(true)}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="Account menu"
+          >
+            <View style={styles.profileCircle}>
+              {userInitial ? (
+                <Text style={styles.profileInitial}>{userInitial}</Text>
+              ) : (
+                <User
+                  size={ICON.size}
+                  color={COLORS.text}
+                  strokeWidth={ICON.strokeWidth}
+                />
+              )}
+            </View>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* Offline Banner State (shown when actually offline) */}
+      {isOffline && (
+        <View style={styles.offlineBanner}>
+          <WifiOff
+            size={ICON.size}
+            color={COLORS.accent}
+            strokeWidth={ICON.strokeWidth}
+          />
+          <Text style={styles.offlineBannerText} numberOfLines={1}>
+            Offline mode. Scans still work.
+          </Text>
+        </View>
+      )}
+
+      {/* Main Scrollable Level-0 Canvas */}
       <ScrollView
+        style={styles.scrollView}
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        {/* Top Minimal Brand Bar */}
-        <View style={styles.topNav}>
-          <View style={styles.brandRow}>
-            <View style={styles.brandMark}>
-              <ScanLine size={16} color="#FFFFFF" strokeWidth={2} />
-            </View>
-            <View>
-              <Text style={styles.brandName}>ExpressCart</Text>
-              <Text style={styles.brandSub}>BYOD Cart-Mount Self-Checkout</Text>
-            </View>
-          </View>
+        {/* 2. Start block (Level 1 white block, radius 16, padding 20px 16px) */}
+        <View style={styles.startBlock}>
+          <Text style={styles.startTitle}>Scan as you shop</Text>
+          <Text style={styles.startBody}>
+            Add items by scanning. Pay with UPI. Skip the checkout line.
+          </Text>
 
-          <View style={styles.topRightRow}>
+          {/* 3 equal interactive step buttons: 40px circle (#E7F4EE) + accent icon + 12px label */}
+          <View style={styles.stepsRow}>
             <TouchableOpacity
-              style={[
-                styles.authPill,
-                userProfile?.isVerified ? styles.authPillVerified : styles.authPillUnverified,
-              ]}
-              onPress={() => router.push('/auth')}
+              style={styles.stepItem}
+              onPress={handleScanItems}
               activeOpacity={0.75}
+              accessibilityRole="button"
+              accessibilityLabel="Scan items"
             >
-              {userProfile?.isVerified ? (
-                <>
-                  <Wallet size={12} color="#059669" strokeWidth={2} />
-                  <Text style={styles.authPillTextVerified}>
-                    {userProfile.name.split(' ')[0]} · ₹{userProfile.walletBalance}
-                  </Text>
-                </>
-              ) : (
-                <>
-                  <UserCheck size={12} color="#B45309" strokeWidth={2} />
-                  <Text style={styles.authPillTextUnverified}>Verify Mobile (+91)</Text>
-                </>
-              )}
+              <View style={styles.stepIconCircle}>
+                <ScanLine
+                  size={ICON.size}
+                  color={COLORS.accent}
+                  strokeWidth={ICON.strokeWidth}
+                />
+              </View>
+              <Text style={styles.stepLabel}>Scan items</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.stepItem}
+              onPress={handlePayWithUpi}
+              activeOpacity={0.75}
+              accessibilityRole="button"
+              accessibilityLabel="Pay with UPI"
+            >
+              <View style={styles.stepIconCircle}>
+                <Smartphone
+                  size={ICON.size}
+                  color={COLORS.accent}
+                  strokeWidth={ICON.strokeWidth}
+                />
+              </View>
+              <Text style={styles.stepLabel}>Pay with UPI</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.stepItem}
+              onPress={handleShowExitPass}
+              activeOpacity={0.75}
+              accessibilityRole="button"
+              accessibilityLabel="Show exit pass"
+            >
+              <View style={styles.stepIconCircle}>
+                <QrCode
+                  size={ICON.size}
+                  color={COLORS.accent}
+                  strokeWidth={ICON.strokeWidth}
+                />
+              </View>
+              <Text style={styles.stepLabel}>Show exit pass</Text>
             </TouchableOpacity>
           </View>
-        </View>
 
-        {/* Clean Architectural Hero Card */}
-        <View style={styles.heroCard}>
-          <View style={styles.heroBadgeRow}>
-            <Text style={styles.eyebrow}>HANDLEBAR MOUNT · SCAN & DROP</Text>
-            <View style={styles.offlineReadyPill}>
-              <WifiOff size={10} color="#059669" strokeWidth={2.2} />
-              <Text style={styles.offlineReadyText}>
-                {STORE_CATALOG.length} SKUs + Offers Cached Offline
-              </Text>
-            </View>
-          </View>
-
-          <Text style={styles.heroTitle}>
-            Mount phone on cart. Drop items in. Skip the counter line.
-          </Text>
-          <Text style={styles.heroSubtitle}>
-            Designed for high-traffic Indian supermarkets like DMart & Reliance Smart Point. Auto-detects store via GPS, caches all Mart offers at the entrance for dead-zone aisles, and verifies exits in 8 seconds.
-          </Text>
-
-          {/* Primary Action */}
-          <TouchableOpacity
-            style={styles.primaryCta}
-            activeOpacity={0.85}
-            onPress={handleStartShopping}
-          >
-            <View style={styles.primaryCtaLeft}>
-              <ShoppingBag size={18} color="#FFFFFF" strokeWidth={1.8} />
-              <Text style={styles.primaryCtaText}>
-                {!userProfile?.isVerified
-                  ? 'Verify Mobile & Start Scanning'
-                  : totalItemsInCart > 0
-                  ? 'Resume Cart Scanner'
-                  : 'Mount Phone & Start Scanning'}
-              </Text>
-            </View>
-            <View style={styles.primaryCtaRight}>
-              {totalItemsInCart > 0 && (
-                <View style={styles.cartBadge}>
-                  <Text style={styles.cartBadgeText}>
-                    {totalItemsInCart} {totalItemsInCart === 1 ? 'item' : 'items'} · ₹{totalCartValue}
-                  </Text>
-                </View>
-              )}
-              <ArrowRight size={17} color="#FFFFFF" strokeWidth={1.8} />
-            </View>
-          </TouchableOpacity>
-
-          {/* Minimal 4-Pillar Strip */}
-          <View style={styles.stepsGrid}>
-            <View style={styles.stepItem}>
-              <Text style={styles.stepIndex}>01</Text>
-              <Text style={styles.stepTitle}>Entrance Sync</Text>
-              <Text style={styles.stepDesc}>GPS + Offline Offers</Text>
-            </View>
-            <View style={styles.stepDivider} />
-            <View style={styles.stepItem}>
-              <Text style={styles.stepIndex}>02</Text>
-              <Text style={styles.stepTitle}>Eco Cart Watch</Text>
-              <Text style={styles.stepDesc}>5s Scan · OLED Sleep</Text>
-            </View>
-            <View style={styles.stepDivider} />
-            <View style={styles.stepItem}>
-              <Text style={styles.stepIndex}>03</Text>
-              <Text style={styles.stepTitle}>Wallet / UPI</Text>
-              <Text style={styles.stepDesc}>Family Multi-Cart Bill</Text>
-            </View>
-          </View>
-        </View>
-
-        {/* Active Exit Pass Banner (if present) */}
-        {lastExitPass && (
-          <TouchableOpacity
-            style={styles.activePassCard}
-            onPress={() => router.push('/guard')}
-            activeOpacity={0.8}
-          >
-            <View style={styles.activePassIcon}>
-              <QrCode size={18} color="#059669" strokeWidth={1.8} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <View style={styles.activePassTitleRow}>
-                <Text style={styles.activePassTitle}>Exit Pass Ready</Text>
-                <Text style={styles.activePassCode}>{lastExitPass.orderId}</Text>
-              </View>
-              <Text style={styles.activePassSub}>
-                ₹{lastExitPass.totalPrice} paid · {lastExitPass.totalItemCount} items · Tap for Guard Reverse-Scan Audit
-              </Text>
-            </View>
-            <ChevronRight size={18} color="#71717A" />
-          </TouchableOpacity>
-        )}
-
-        {/* GPS Store Auto-Detection & Entrance Offline Mart API Sync */}
-        <View style={styles.sectionCard}>
-          <View style={styles.sectionHeader}>
-            <View style={styles.sectionTitleGroup}>
-              <MapPin size={15} color="#18181B" strokeWidth={1.8} />
-              <Text style={styles.sectionTitle}>
-                GPS Store Auto-Select & Entrance API Cache
-              </Text>
-            </View>
+          {totalItemsInCart > 0 && (
+            /* Resume cart summary tile */
             <TouchableOpacity
-              style={styles.gpsSyncBtn}
+              style={[styles.resumeCartTile, { marginTop: SPACING.page }]}
+              onPress={handleStartShopping}
+              activeOpacity={0.8}
+            >
+              <View style={styles.resumeCartLeft}>
+                <View style={styles.stepIconCircle}>
+                  <ScanLine
+                    size={ICON.size}
+                    color={COLORS.accent}
+                    strokeWidth={ICON.strokeWidth}
+                  />
+                </View>
+                <Text style={styles.resumeCartText} numberOfLines={1}>
+                  {totalItemsInCart}{' '}
+                  {totalItemsInCart === 1 ? 'item' : 'items'} · ₹
+                  {totalCartSavings} saved so far
+                </Text>
+              </View>
+              <ChevronRight
+                size={ICON.size}
+                color={COLORS.textSecondary}
+                strokeWidth={ICON.strokeWidth}
+              />
+            </TouchableOpacity>
+          )}
+        </View>
+
+        {/* 3. Offers block (Level 1 white block, radius 16, padding 16) */}
+        {hasOffers && (
+          <View style={styles.offersBlock}>
+            <View style={styles.offersHeaderRow}>
+              <Text style={styles.sectionHeading}>Offers today</Text>
+              <TouchableOpacity
+                style={styles.seeAllHeaderTouch}
+                onPress={() => setShowAllOffers((prev) => !prev)}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.seeAllHeaderLink}>
+                  {showAllOffers ? 'Show less' : 'See all'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.offersGrid}>
+              {isLoadingOffers ? (
+                [1, 2, 3, 4, 5, 6].map((n) => (
+                  <View key={n} style={styles.offerCard}>
+                    <View style={styles.monogramTileSkeleton} />
+                    <View style={styles.skeletonTextWide} />
+                    <View style={styles.skeletonTextShort} />
+                    <View style={styles.skeletonPrice} />
+                  </View>
+                ))
+              ) : (
+                <>
+                  {featuredOffers.map((item) => {
+                    const discount = Math.max(0, item.mrp - item.storePrice);
+                    const monogram = getBrandMonogram(item.brand, item.name);
+                    const dealLine = getOfferDealLine(item.offerType);
+
+                    return (
+                      <TouchableOpacity
+                        key={item.barcode}
+                        style={styles.offerCard}
+                        onPress={() => handleSelectOffer(item.barcode)}
+                        activeOpacity={0.82}
+                      >
+                        {/* Monogram tile: 84px high, #E9ECEF, radius 12, 26px semibold in accent green */}
+                        <View style={styles.monogramTile}>
+                          <Text style={styles.monogramLetters}>{monogram}</Text>
+                          {discount > 0 && (
+                            <View style={styles.discountTagPill}>
+                              <Text style={styles.discountTagText}>
+                                ₹{discount} off
+                              </Text>
+                            </View>
+                          )}
+                        </View>
+
+                        <Text style={styles.offerName} numberOfLines={2}>
+                          {item.name}
+                        </Text>
+                        <Text style={styles.offerWeight} numberOfLines={1}>
+                          {item.unit}
+                        </Text>
+
+                        <View style={styles.offerPriceRow}>
+                          <Text style={styles.offerPrice}>
+                            ₹{item.storePrice}
+                          </Text>
+                          {item.mrp > item.storePrice && (
+                            <Text style={styles.offerOldPrice}>
+                              ₹{item.mrp}
+                            </Text>
+                          )}
+                        </View>
+
+                        {dealLine && (
+                          <Text style={styles.offerDealLine} numberOfLines={1}>
+                            {dealLine}
+                          </Text>
+                        )}
+                      </TouchableOpacity>
+                    );
+                  })}
+
+                  {/* Last grid tile: bordered "See all offers >" link (the ONLY bordered element) */}
+                  <TouchableOpacity
+                    style={styles.seeAllGridTile}
+                    onPress={() => setShowAllOffers((prev) => !prev)}
+                    activeOpacity={0.75}
+                  >
+                    <View style={styles.seeAllGridInner}>
+                      <Text style={styles.seeAllGridText}>
+                        {showAllOffers ? 'Show fewer' : 'See all offers'}
+                      </Text>
+                      <ChevronRight
+                        size={ICON.size}
+                        color={COLORS.accent}
+                        strokeWidth={ICON.strokeWidth}
+                      />
+                    </View>
+                  </TouchableOpacity>
+                </>
+              )}
+            </View>
+          </View>
+        )}
+      </ScrollView>
+
+      {/* 4. Bottom action bar (white, top hairline, padding 12px 16px, sticky/fixed bottom 0) */}
+      <View style={styles.bottomActionBar}>
+        <TouchableOpacity
+          style={[
+            styles.primaryButton,
+            !hasStoreSelected && styles.primaryButtonDisabled,
+          ]}
+          disabled={!hasStoreSelected}
+          onPress={handleStartShopping}
+          activeOpacity={0.88}
+          accessibilityRole="button"
+        >
+          <Text style={styles.primaryButtonLabel}>
+            {totalItemsInCart > 0 ? 'Resume cart' : 'Start shopping'}
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.familyLinkRow}
+          onPress={() => setShowFamilySheet(true)}
+          activeOpacity={0.7}
+        >
+          <Users
+            size={ICON.size}
+            color={COLORS.accent}
+            strokeWidth={ICON.strokeWidth}
+          />
+          <Text style={styles.familyLinkText} numberOfLines={1}>
+            {familySession?.isActive
+              ? `Shopping with family · Code ${familySession.pinCode}`
+              : 'Shopping with family? Link a 2nd cart'}
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.securityCaptionRow}
+          onPress={() => router.push('/auth')}
+          activeOpacity={0.7}
+        >
+          <Lock
+            size={ICON.lockSize}
+            color={COLORS.captionText}
+            strokeWidth={ICON.strokeWidth}
+          />
+          <Text style={styles.securityCaptionText} numberOfLines={1}>
+            Secure exit pass · verified by your mobile number
+          </Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Store Picker Modal */}
+      <Modal
+        visible={showStorePicker}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setShowStorePicker(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Choose a store</Text>
+              <TouchableOpacity
+                style={styles.iconTouch}
+                onPress={() => setShowStorePicker(false)}
+              >
+                <X
+                  size={ICON.size}
+                  color={COLORS.textSecondary}
+                  strokeWidth={ICON.strokeWidth}
+                />
+              </TouchableOpacity>
+            </View>
+
+            <TouchableOpacity
+              style={styles.locationDetectTile}
               onPress={handleGpsAutoDetectAndSync}
               activeOpacity={0.75}
             >
-              <Navigation size={11} color="#059669" strokeWidth={2.2} />
-              <Text style={styles.gpsSyncBtnText}>
-                {isSyncingGps ? 'Syncing API...' : 'GPS Auto-Detect'}
+              <Navigation
+                size={ICON.size}
+                color={COLORS.accent}
+                strokeWidth={ICON.strokeWidth}
+              />
+              <Text style={styles.locationDetectText}>
+                {isSyncingGps
+                  ? 'Finding nearest store...'
+                  : 'Use current location'}
               </Text>
             </TouchableOpacity>
-          </View>
 
-          <View style={styles.apiSyncInfoBar}>
-            <RefreshCw size={12} color="#065F46" strokeWidth={2} />
-            <Text style={styles.apiSyncInfoText}>
-              Mart API Synced at {lastCatalogSyncTime} · {STORE_CATALOG.length} SKUs & BOGO/Combo rules cached locally for 0-signal dead zones.
-            </Text>
-          </View>
-
-          <View style={styles.storeList}>
-            {PILOT_STORE_BRANCHES.map((storeObj) => {
-              const selected = storeObj.name === activeStore;
-              return (
-                <TouchableOpacity
-                  key={storeObj.id}
-                  style={[styles.storeRow, selected && styles.storeRowSelected]}
-                  activeOpacity={0.75}
-                  onPress={() => {
-                    setActiveStore(storeObj.name, false);
-                    setCheckedIn(true);
-                  }}
-                >
-                  <View
+            <View style={styles.modalListGroup}>
+              {PILOT_STORE_BRANCHES.map((branch, idx) => {
+                const selected = branch.name === activeStore;
+                return (
+                  <TouchableOpacity
+                    key={branch.id}
                     style={[
-                      styles.radioCircle,
-                      selected && styles.radioCircleSelected,
+                      styles.modalListRow,
+                      idx > 0 && styles.modalListRowDivider,
                     ]}
+                    onPress={() => handleSelectStore(branch.name)}
+                    activeOpacity={0.7}
                   >
-                    {selected && <Check size={11} color="#FFFFFF" strokeWidth={2.5} />}
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <View style={styles.storeTitleLine}>
+                    <View style={{ flex: 1, minWidth: 0 }}>
                       <Text
                         style={[
-                          styles.storeNameText,
-                          selected && styles.storeNameTextSelected,
+                          styles.modalListRowTitle,
+                          selected && styles.modalListRowTitleSelected,
                         ]}
                         numberOfLines={1}
                       >
-                        {storeObj.shortName}
+                        {formatCleanStoreName(branch.shortName, branch.name)}
                       </Text>
-                      {selected && gpsAutoDetected && (
-                        <View style={styles.gpsTag}>
-                          <Text style={styles.gpsTagText}>GPS Locked</Text>
-                        </View>
-                      )}
+                      <Text style={styles.modalListRowSub} numberOfLines={1}>
+                        {branch.city}
+                      </Text>
                     </View>
-                    <Text style={styles.storeCityText}>
-                      {storeObj.city} · {storeObj.catalogSizeKb} KB Offline Pack
-                    </Text>
-                  </View>
-                  <View style={styles.laneBadge}>
-                    <Text style={styles.laneBadgeText}>{storeObj.lane}</Text>
-                  </View>
-                </TouchableOpacity>
-              );
-            })}
+                    {selected && (
+                      <Check
+                        size={ICON.size}
+                        color={COLORS.accent}
+                        strokeWidth={ICON.strokeWidth}
+                      />
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            {hasStoreSelected && (
+              <TouchableOpacity
+                style={styles.clearStoreTouch}
+                onPress={() => {
+                  setActiveStore('', false);
+                  setShowStorePicker(false);
+                }}
+              >
+                <Text style={styles.clearStoreText}>Clear selected store</Text>
+              </TouchableOpacity>
+            )}
           </View>
         </View>
+      </Modal>
 
-        {/* Family / Multi-Cart Mode ("Buy Together" Under One Single Bill) */}
-        <View style={styles.sectionCard}>
-          <View style={styles.sectionHeader}>
-            <View style={styles.sectionTitleGroup}>
-              <Users size={15} color="#18181B" strokeWidth={1.8} />
-              <Text style={styles.sectionTitle}>
-                Family / Multi-Cart Mode (Buy Together)
-              </Text>
+      {/* Profile Menu Modal: Sign in, Passes, Wallet, Help */}
+      <Modal
+        visible={showProfileMenu}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setShowProfileMenu(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHeader}>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={styles.modalTitle} numberOfLines={1}>
+                  {isSignedIn ? userProfile?.name : 'Account'}
+                </Text>
+                <Text style={styles.modalSubtitle} numberOfLines={1}>
+                  {isSignedIn
+                    ? `+91 ${userProfile?.phone}`
+                    : 'Sign in with your mobile number'}
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={styles.iconTouch}
+                onPress={() => setShowProfileMenu(false)}
+              >
+                <X
+                  size={ICON.size}
+                  color={COLORS.textSecondary}
+                  strokeWidth={ICON.strokeWidth}
+                />
+              </TouchableOpacity>
             </View>
-            <Text style={styles.sectionMeta}>2 Carts · 1 Single Bill</Text>
+
+            <View style={styles.modalListGroup}>
+              <TouchableOpacity
+                style={styles.modalListRow}
+                onPress={() => {
+                  setShowProfileMenu(false);
+                  router.push('/auth');
+                }}
+                activeOpacity={0.7}
+              >
+                <User
+                  size={ICON.size}
+                  color={COLORS.text}
+                  strokeWidth={ICON.strokeWidth}
+                />
+                <Text style={styles.menuItemLabel}>
+                  {isSignedIn ? 'Account' : 'Sign in'}
+                </Text>
+                <ChevronRight
+                  size={ICON.size}
+                  color={COLORS.textSecondary}
+                  strokeWidth={ICON.strokeWidth}
+                />
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.modalListRow, styles.modalListRowDivider]}
+                onPress={() => {
+                  setShowProfileMenu(false);
+                  router.push('/orders');
+                }}
+                activeOpacity={0.7}
+              >
+                <Receipt
+                  size={ICON.size}
+                  color={COLORS.text}
+                  strokeWidth={ICON.strokeWidth}
+                />
+                <Text style={styles.menuItemLabel}>Passes</Text>
+                <ChevronRight
+                  size={ICON.size}
+                  color={COLORS.textSecondary}
+                  strokeWidth={ICON.strokeWidth}
+                />
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.modalListRow, styles.modalListRowDivider]}
+                onPress={() => {
+                  setShowProfileMenu(false);
+                  router.push('/auth');
+                }}
+                activeOpacity={0.7}
+              >
+                <Wallet
+                  size={ICON.size}
+                  color={COLORS.text}
+                  strokeWidth={ICON.strokeWidth}
+                />
+                <Text style={styles.menuItemLabel}>
+                  {isSignedIn
+                    ? `Wallet · ₹${userProfile?.walletBalance ?? 0}`
+                    : 'Wallet'}
+                </Text>
+                <ChevronRight
+                  size={ICON.size}
+                  color={COLORS.textSecondary}
+                  strokeWidth={ICON.strokeWidth}
+                />
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.modalListRow, styles.modalListRowDivider]}
+                onPress={toggleDarkMode}
+                activeOpacity={0.7}
+              >
+                {isDarkMode ? (
+                  <Sun
+                    size={ICON.size}
+                    color={COLORS.text}
+                    strokeWidth={ICON.strokeWidth}
+                  />
+                ) : (
+                  <Moon
+                    size={ICON.size}
+                    color={COLORS.text}
+                    strokeWidth={ICON.strokeWidth}
+                  />
+                )}
+                <Text style={styles.menuItemLabel}>
+                  {isDarkMode ? 'Light mode' : 'Dark mode'}
+                </Text>
+                <ChevronRight
+                  size={ICON.size}
+                  color={COLORS.textSecondary}
+                  strokeWidth={ICON.strokeWidth}
+                />
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.modalListRow, styles.modalListRowDivider]}
+                onPress={() => {
+                  setShowProfileMenu(false);
+                  setShowHelpSheet(true);
+                }}
+                activeOpacity={0.7}
+              >
+                <HelpCircle
+                  size={ICON.size}
+                  color={COLORS.text}
+                  strokeWidth={ICON.strokeWidth}
+                />
+                <Text style={styles.menuItemLabel}>Help</Text>
+                <ChevronRight
+                  size={ICON.size}
+                  color={COLORS.textSecondary}
+                  strokeWidth={ICON.strokeWidth}
+                />
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.modalListRow, styles.modalListRowDivider]}
+                onPress={() => {
+                  setShowProfileMenu(false);
+                  router.push('/legal');
+                }}
+                activeOpacity={0.7}
+              >
+                <FileText
+                  size={ICON.size}
+                  color={COLORS.text}
+                  strokeWidth={ICON.strokeWidth}
+                />
+                <Text style={styles.menuItemLabel}>Terms & privacy</Text>
+                <ChevronRight
+                  size={ICON.size}
+                  color={COLORS.textSecondary}
+                  strokeWidth={ICON.strokeWidth}
+                />
+              </TouchableOpacity>
+
+              {isSignedIn && (
+                <TouchableOpacity
+                  style={[styles.modalListRow, styles.modalListRowDivider]}
+                  onPress={() => {
+                    logoutUser();
+                    setShowProfileMenu(false);
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <LogOut
+                    size={ICON.size}
+                    color={COLORS.danger}
+                    strokeWidth={ICON.strokeWidth}
+                  />
+                  <Text style={[styles.menuItemLabel, { color: COLORS.danger }]}>
+                    Sign out
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </View>
           </View>
+        </View>
+      </Modal>
 
-          {familySession?.isActive ? (
-            <View style={styles.familyActiveBox}>
-              <View style={styles.familyActiveTop}>
-                <View>
-                  <Text style={styles.familyActiveTitle}>
-                    Family Session Active · Code {familySession.pinCode}
-                  </Text>
-                  <Text style={styles.familyActiveSub}>
-                    Cart #1 ({familySession.hostName}) + Cart #2 ({familySession.memberName}) linked under one GST bill.
-                  </Text>
-                </View>
-                <TouchableOpacity
-                  style={styles.leaveFamilyBtn}
-                  onPress={leaveFamilySession}
-                >
-                  <Text style={styles.leaveFamilyText}>End</Text>
-                </TouchableOpacity>
+      {/* Shopping with family (4-digit PIN flow) */}
+      <Modal
+        visible={showFamilySheet}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setShowFamilySheet(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHeader}>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={styles.modalTitle}>Shopping with family</Text>
+                <Text style={styles.modalSubtitle}>
+                  Link a 2nd cart with a 4-digit PIN so two phones can scan into
+                  one bill.
+                </Text>
               </View>
+              <TouchableOpacity
+                style={styles.iconTouch}
+                onPress={() => setShowFamilySheet(false)}
+              >
+                <X
+                  size={ICON.size}
+                  color={COLORS.textSecondary}
+                  strokeWidth={ICON.strokeWidth}
+                />
+              </TouchableOpacity>
             </View>
-          ) : (
-            <View>
-              <Text style={styles.familyDesc}>
-                Shopping with family or need 2 carts for a monthly haul? Link multiple carts so everyone can scan items in different aisles and pay once under one name.
-              </Text>
-              <View style={styles.familyBtnRow}>
+
+            {familySession?.isActive ? (
+              <View style={styles.familyActiveBox}>
+                <Text style={styles.familyPinCaption}>4-digit room PIN</Text>
+                <Text style={styles.familyPinDisplay}>
+                  {familySession.pinCode}
+                </Text>
+                <Text style={styles.familyMembersCaption}>
+                  {familySession.hostName} · {familySession.memberName}
+                </Text>
+
                 <TouchableOpacity
-                  style={styles.familyPrimaryBtn}
-                  onPress={() => startFamilySession('Priya (Cart #2)')}
-                  activeOpacity={0.8}
+                  style={styles.primaryButton}
+                  onPress={() => {
+                    setShowFamilySheet(false);
+                    handleStartShopping();
+                  }}
+                  activeOpacity={0.88}
                 >
-                  <Users size={14} color="#FFFFFF" strokeWidth={2} />
-                  <Text style={styles.familyPrimaryBtnText}>
-                    Create 2-Cart Family Session
+                  <Text style={styles.primaryButtonLabel}>
+                    {totalItemsInCart > 0 ? 'Resume cart' : 'Start shopping'}
                   </Text>
                 </TouchableOpacity>
+
                 <TouchableOpacity
-                  style={styles.familySecondaryBtn}
-                  onPress={() => setShowJoinInput((prev) => !prev)}
-                  activeOpacity={0.8}
+                  style={styles.unlinkFamilyTouch}
+                  onPress={() => leaveFamilySession()}
                 >
-                  <Text style={styles.familySecondaryBtnText}>Join via Code</Text>
+                  <Text style={styles.unlinkFamilyText}>Unlink 2nd cart</Text>
                 </TouchableOpacity>
               </View>
+            ) : (
+              <View style={styles.familyFormArea}>
+                <TouchableOpacity
+                  style={styles.primaryButton}
+                  onPress={() => startFamilySession('Family Cart #2')}
+                  activeOpacity={0.88}
+                >
+                  <Text style={styles.primaryButtonLabel}>
+                    Create 4-digit PIN
+                  </Text>
+                </TouchableOpacity>
 
-              {showJoinInput && (
-                <View style={styles.joinRow}>
+                <View style={styles.orDividerRow}>
+                  <View style={styles.orLine} />
+                  <Text style={styles.orText}>or enter a PIN</Text>
+                  <View style={styles.orLine} />
+                </View>
+
+                <View style={styles.pinInputRow}>
                   <TextInput
-                    style={styles.joinInput}
+                    style={styles.pinInput}
                     value={joinCodeInput}
-                    onChangeText={(t) => setJoinCodeInput(t.replace(/\D/g, '').slice(0, 4))}
-                    placeholder="Enter 4-digit Family PIN (e.g. 4829)"
-                    placeholderTextColor="#A1A1AA"
+                    onChangeText={(t) =>
+                      setJoinCodeInput(t.replace(/\D/g, '').slice(0, 4))
+                    }
+                    placeholder="4-digit PIN"
+                    placeholderTextColor={COLORS.textSecondary}
                     keyboardType="numeric"
                     maxLength={4}
                   />
                   <TouchableOpacity
-                    style={styles.joinConfirmBtn}
+                    style={[
+                      styles.pinJoinButton,
+                      joinCodeInput.trim().length !== 4 &&
+                        styles.primaryButtonDisabled,
+                    ]}
+                    disabled={joinCodeInput.trim().length !== 4}
                     onPress={() => {
-                      joinFamilySession(joinCodeInput || '4829');
-                      setShowJoinInput(false);
+                      if (joinCodeInput.trim().length === 4) {
+                        joinFamilySession(joinCodeInput.trim());
+                        setJoinCodeInput('');
+                      }
                     }}
+                    activeOpacity={0.85}
                   >
-                    <Text style={styles.joinConfirmBtnText}>Link Cart #2</Text>
+                    <Text style={styles.primaryButtonLabel}>Link</Text>
                   </TouchableOpacity>
                 </View>
-              )}
-            </View>
-          )}
+              </View>
+            )}
+          </View>
         </View>
+      </Modal>
 
-        {/* Catalog Preview Strip */}
-        <View style={styles.sectionCard}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Cached Store Offers & SKUs</Text>
-            <TouchableOpacity onPress={handleStartShopping}>
-              <Text style={styles.sectionActionLink}>
-                Open Scanner ({STORE_CATALOG.length} SKUs)
-              </Text>
+      {/* Help Modal */}
+      <Modal
+        visible={showHelpSheet}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setShowHelpSheet(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>How it works</Text>
+              <TouchableOpacity
+                style={styles.iconTouch}
+                onPress={() => setShowHelpSheet(false)}
+              >
+                <X
+                  size={ICON.size}
+                  color={COLORS.textSecondary}
+                  strokeWidth={ICON.strokeWidth}
+                />
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.helpStepsList}>
+              <View style={styles.helpStepTile}>
+                <Text style={styles.helpStepHeading}>1. Scan items</Text>
+                <Text style={styles.helpStepCopy}>
+                  Scan barcodes as you place items in your cart. Store prices
+                  and deals work even without mobile signal.
+                </Text>
+              </View>
+              <View style={styles.helpStepTile}>
+                <Text style={styles.helpStepHeading}>2. Pay with UPI</Text>
+                <Text style={styles.helpStepCopy}>
+                  Skip the checkout line and pay directly with UPI or your store
+                  wallet.
+                </Text>
+              </View>
+              <View style={styles.helpStepTile}>
+                <Text style={styles.helpStepHeading}>3. Show exit pass</Text>
+                <Text style={styles.helpStepCopy}>
+                  Present your signed QR exit pass to the associate at the
+                  express gate.
+                </Text>
+              </View>
+            </View>
+
+            <TouchableOpacity
+              style={styles.primaryButton}
+              onPress={() => setShowHelpSheet(false)}
+              activeOpacity={0.88}
+            >
+              <Text style={styles.primaryButtonLabel}>Got it</Text>
             </TouchableOpacity>
           </View>
-
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.catalogPreviewScroll}
-          >
-            {QUICK_TEST_ITEMS.map((item) => {
-              const save = item.mrp - item.storePrice;
-              const code =
-                item.brand
-                  .replace(/[^a-zA-Z0-9]/g, '')
-                  .slice(0, 2)
-                  .toUpperCase() || 'SK';
-              return (
-                <TouchableOpacity
-                  key={item.barcode}
-                  style={styles.previewCard}
-                  onPress={handleStartShopping}
-                  activeOpacity={0.75}
-                >
-                  <View style={styles.previewCardTop}>
-                    <View
-                      style={[
-                        styles.monogramBox,
-                        { borderColor: item.packageColorHex || '#E4E4E7' },
-                      ]}
-                    >
-                      <Text style={styles.monogramText}>{code}</Text>
-                    </View>
-                    {save > 0 && (
-                      <View style={styles.savePill}>
-                        <Text style={styles.savePillText}>Save ₹{save}</Text>
-                      </View>
-                    )}
-                  </View>
-                  <Text style={styles.previewBrand} numberOfLines={1}>
-                    {item.brand}
-                  </Text>
-                  <Text style={styles.previewName} numberOfLines={1}>
-                    {item.name}
-                  </Text>
-                  <Text style={styles.previewUnit}>{item.unit}</Text>
-                  <View style={styles.previewPriceRow}>
-                    <Text style={styles.previewPrice}>₹{item.storePrice}</Text>
-                    {item.mrp > item.storePrice && (
-                      <Text style={styles.previewMrp}>₹{item.mrp}</Text>
-                    )}
-                  </View>
-                </TouchableOpacity>
-              );
-            })}
-          </ScrollView>
         </View>
-
-        {/* Staff / Exit Verification Terminal */}
-        <View style={styles.staffCard}>
-          <TouchableOpacity
-            style={styles.staffHeaderRow}
-            activeOpacity={0.75}
-            onPress={() => {
-              setShowPinEntry((prev) => !prev);
-              setPinError(null);
-            }}
-          >
-            <View style={styles.staffIconBox}>
-              <ShieldCheck size={17} color="#18181B" strokeWidth={1.8} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.staffTitle}>Exit Gate Verification Terminal</Text>
-              <Text style={styles.staffSub}>
-                Reverse barcode spot-scanner, weight check & swap-fraud detector · PIN 1234
-              </Text>
-            </View>
-            <Lock size={15} color="#71717A" strokeWidth={1.8} />
-          </TouchableOpacity>
-
-          {showPinEntry && (
-            <View style={styles.pinDrawer}>
-              <View style={styles.pinInputRow}>
-                <TextInput
-                  style={styles.pinInput}
-                  value={pinInput}
-                  onChangeText={(text) => {
-                    setPinInput(text);
-                    setPinError(null);
-                  }}
-                  placeholder="Staff PIN (1234)"
-                  placeholderTextColor="#A1A1AA"
-                  keyboardType="numeric"
-                  secureTextEntry
-                  maxLength={4}
-                />
-                <TouchableOpacity
-                  style={styles.pinUnlockBtn}
-                  onPress={handleGuardUnlock}
-                  activeOpacity={0.8}
-                >
-                  <Text style={styles.pinUnlockText}>Open Terminal</Text>
-                </TouchableOpacity>
-              </View>
-
-              <TouchableOpacity
-                style={styles.quickAccessLink}
-                onPress={() => {
-                  setPinInput('1234');
-                  setPinError(null);
-                  router.push('/guard');
-                }}
-              >
-                <Text style={styles.quickAccessLinkText}>
-                  Quick launch with pilot PIN (1234) →
-                </Text>
-              </TouchableOpacity>
-
-              {pinError && <Text style={styles.pinErrorText}>{pinError}</Text>}
-            </View>
-          )}
-        </View>
-      </ScrollView>
+      </Modal>
     </SafeAreaView>
   );
 }
 
-const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: '#FAFAFA',
-  },
-  scrollContent: {
-    paddingHorizontal: 20,
-    paddingTop: 18,
-    paddingBottom: 48,
-    maxWidth: 640,
-    width: '100%',
-    alignSelf: 'center',
-  },
-  topNav: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 18,
-  },
-  brandRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  brandMark: {
-    width: 34,
-    height: 34,
-    borderRadius: 9,
-    backgroundColor: '#09090B',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  brandName: {
-    color: '#09090B',
-    fontSize: 16,
-    fontWeight: '600',
-    letterSpacing: -0.3,
-  },
-  brandSub: {
-    color: '#71717A',
-    fontSize: 11,
-    fontWeight: '400',
-  },
-  topRightRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  authPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 11,
-    paddingVertical: 6,
-    borderRadius: 999,
-    borderWidth: 1,
-    gap: 6,
-  },
-  authPillVerified: {
-    backgroundColor: '#ECFDF5',
-    borderColor: '#A7F3D0',
-  },
-  authPillUnverified: {
-    backgroundColor: '#FFFBEB',
-    borderColor: '#FDE68A',
-  },
-  authPillTextVerified: {
-    color: '#065F46',
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  authPillTextUnverified: {
-    color: '#92400E',
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  heroCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 22,
-    marginBottom: 14,
-    borderWidth: 1,
-    borderColor: '#E4E4E7',
-  },
-  heroBadgeRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginBottom: 10,
-  },
-  eyebrow: {
-    color: '#71717A',
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 0.8,
-  },
-  offlineReadyPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    backgroundColor: '#ECFDF5',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 999,
-  },
-  offlineReadyText: {
-    color: '#065F46',
-    fontSize: 10,
-    fontWeight: '600',
-  },
-  heroTitle: {
-    color: '#09090B',
-    fontSize: 24,
-    fontWeight: '600',
-    letterSpacing: -0.5,
-    lineHeight: 30,
-    marginBottom: 8,
-  },
-  heroSubtitle: {
-    color: '#52525B',
-    fontSize: 13,
-    lineHeight: 20,
-    marginBottom: 18,
-  },
-  primaryCta: {
-    backgroundColor: '#09090B',
-    borderRadius: 12,
-    paddingVertical: 15,
-    paddingHorizontal: 18,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 18,
-  },
-  primaryCtaLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  primaryCtaText: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    fontWeight: '600',
-    letterSpacing: -0.2,
-  },
-  primaryCtaRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  cartBadge: {
-    backgroundColor: '#27272A',
-    paddingHorizontal: 9,
-    paddingVertical: 4,
-    borderRadius: 6,
-  },
-  cartBadgeText: {
-    color: '#FAFAFA',
-    fontSize: 12,
-    fontWeight: '500',
-  },
-  stepsGrid: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    borderTopWidth: 1,
-    borderTopColor: '#F4F4F5',
-    paddingTop: 14,
-  },
-  stepItem: {
-    flex: 1,
-  },
-  stepDivider: {
-    width: 1,
-    height: 36,
-    backgroundColor: '#E4E4E7',
-    marginHorizontal: 10,
-    alignSelf: 'center',
-  },
-  stepIndex: {
-    color: '#A1A1AA',
-    fontSize: 11,
-    fontWeight: '600',
-    marginBottom: 2,
-  },
-  stepTitle: {
-    color: '#18181B',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  stepDesc: {
-    color: '#71717A',
-    fontSize: 11,
-    marginTop: 1,
-  },
-  activePassCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 14,
-    padding: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    marginBottom: 14,
-    borderWidth: 1,
-    borderColor: '#A7F3D0',
-  },
-  activePassIcon: {
-    width: 38,
-    height: 38,
-    borderRadius: 10,
-    backgroundColor: '#ECFDF5',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  activePassTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  activePassTitle: {
-    color: '#065F46',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  activePassCode: {
-    color: '#059669',
-    fontSize: 11,
-    fontWeight: '500',
-    backgroundColor: '#ECFDF5',
-    paddingHorizontal: 6,
-    paddingVertical: 1,
-    borderRadius: 4,
-  },
-  activePassSub: {
-    color: '#52525B',
-    fontSize: 12,
-    marginTop: 2,
-  },
-  sectionCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 18,
-    marginBottom: 14,
-    borderWidth: 1,
-    borderColor: '#E4E4E7',
-  },
-  sectionHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  sectionTitleGroup: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 7,
-    flex: 1,
-  },
-  sectionTitle: {
-    color: '#09090B',
-    fontSize: 14,
-    fontWeight: '600',
-    letterSpacing: -0.2,
-  },
-  sectionMeta: {
-    color: '#71717A',
-    fontSize: 11,
-    fontWeight: '500',
-  },
-  sectionActionLink: {
-    color: '#18181B',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  gpsSyncBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    backgroundColor: '#ECFDF5',
-    borderWidth: 1,
-    borderColor: '#A7F3D0',
-    paddingHorizontal: 9,
-    paddingVertical: 5,
-    borderRadius: 999,
-  },
-  gpsSyncBtnText: {
-    color: '#065F46',
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  apiSyncInfoBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    backgroundColor: '#ECFDF5',
-    borderRadius: 9,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    marginBottom: 12,
-  },
-  apiSyncInfoText: {
-    flex: 1,
-    color: '#065F46',
-    fontSize: 11,
-    lineHeight: 16,
-  },
-  storeList: {
-    gap: 8,
-  },
-  storeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    borderRadius: 12,
-    backgroundColor: '#FAFAFA',
-    borderWidth: 1,
-    borderColor: '#E4E4E7',
-    gap: 12,
-  },
-  storeRowSelected: {
-    backgroundColor: '#FFFFFF',
-    borderColor: '#09090B',
-  },
-  radioCircle: {
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    borderWidth: 1.5,
-    borderColor: '#D4D4D8',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  radioCircleSelected: {
-    backgroundColor: '#09090B',
-    borderColor: '#09090B',
-  },
-  storeTitleLine: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  storeNameText: {
-    color: '#27272A',
-    fontSize: 13,
-    fontWeight: '500',
-  },
-  storeNameTextSelected: {
-    color: '#09090B',
-    fontWeight: '600',
-  },
-  gpsTag: {
-    backgroundColor: '#ECFDF5',
-    paddingHorizontal: 6,
-    paddingVertical: 1,
-    borderRadius: 4,
-  },
-  gpsTagText: {
-    color: '#059669',
-    fontSize: 9,
-    fontWeight: '700',
-  },
-  storeCityText: {
-    color: '#71717A',
-    fontSize: 11,
-    marginTop: 2,
-  },
-  laneBadge: {
-    backgroundColor: '#F4F4F5',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
-  },
-  laneBadgeText: {
-    color: '#52525B',
-    fontSize: 11,
-    fontWeight: '500',
-  },
-  // Family Mode Styles
-  familyDesc: {
-    color: '#52525B',
-    fontSize: 12,
-    lineHeight: 18,
-    marginBottom: 12,
-  },
-  familyBtnRow: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  familyPrimaryBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    backgroundColor: '#09090B',
-    borderRadius: 10,
-    paddingVertical: 11,
-  },
-  familyPrimaryBtnText: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  familySecondaryBtn: {
-    backgroundColor: '#FAFAFA',
-    borderWidth: 1,
-    borderColor: '#D4D4D8',
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    justifyContent: 'center',
-  },
-  familySecondaryBtnText: {
-    color: '#09090B',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  joinRow: {
-    flexDirection: 'row',
-    gap: 8,
-    marginTop: 10,
-  },
-  joinInput: {
-    flex: 1,
-    backgroundColor: '#FAFAFA',
-    borderWidth: 1,
-    borderColor: '#E4E4E7',
-    borderRadius: 9,
-    paddingHorizontal: 12,
-    paddingVertical: 9,
-    fontSize: 12,
-    color: '#09090B',
-  },
-  joinConfirmBtn: {
-    backgroundColor: '#059669',
-    borderRadius: 9,
-    paddingHorizontal: 14,
-    justifyContent: 'center',
-  },
-  joinConfirmBtnText: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  familyActiveBox: {
-    backgroundColor: '#ECFDF5',
-    borderWidth: 1,
-    borderColor: '#A7F3D0',
-    borderRadius: 12,
-    padding: 12,
-  },
-  familyActiveTop: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 10,
-  },
-  familyActiveTitle: {
-    color: '#065F46',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  familyActiveSub: {
-    color: '#047857',
-    fontSize: 11,
-    marginTop: 2,
-    lineHeight: 16,
-  },
-  leaveFamilyBtn: {
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 7,
-    borderWidth: 1,
-    borderColor: '#A7F3D0',
-  },
-  leaveFamilyText: {
-    color: '#065F46',
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  catalogPreviewScroll: {
-    gap: 10,
-  },
-  previewCard: {
-    width: 138,
-    backgroundColor: '#FAFAFA',
-    borderRadius: 12,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: '#E4E4E7',
-  },
-  previewCardTop: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  monogramBox: {
-    width: 32,
-    height: 32,
-    borderRadius: 8,
-    backgroundColor: '#F4F4F5',
-    borderWidth: 2,
-    borderColor: '#E4E4E7',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  monogramText: {
-    color: '#18181B',
-    fontSize: 11,
-    fontWeight: '600',
-    letterSpacing: 0.4,
-  },
-  savePill: {
-    backgroundColor: '#ECFDF5',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  savePillText: {
-    color: '#059669',
-    fontSize: 10,
-    fontWeight: '600',
-  },
-  previewBrand: {
-    color: '#71717A',
-    fontSize: 10,
-    fontWeight: '500',
-    textTransform: 'uppercase',
-    letterSpacing: 0.4,
-  },
-  previewName: {
-    color: '#09090B',
-    fontSize: 12,
-    fontWeight: '600',
-    marginTop: 2,
-  },
-  previewUnit: {
-    color: '#71717A',
-    fontSize: 11,
-    marginTop: 1,
-    marginBottom: 8,
-  },
-  previewPriceRow: {
-    flexDirection: 'row',
-    alignItems: 'baseline',
-    gap: 5,
-  },
-  previewPrice: {
-    color: '#09090B',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  previewMrp: {
-    color: '#A1A1AA',
-    fontSize: 11,
-    textDecorationLine: 'line-through',
-  },
-  staffCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: '#E4E4E7',
-  },
-  staffHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  staffIconBox: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    backgroundColor: '#F4F4F5',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  staffTitle: {
-    color: '#09090B',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  staffSub: {
-    color: '#71717A',
-    fontSize: 12,
-    marginTop: 1,
-  },
-  pinDrawer: {
-    marginTop: 14,
-    paddingTop: 14,
-    borderTopWidth: 1,
-    borderTopColor: '#F4F4F5',
-  },
-  pinInputRow: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  pinInput: {
-    flex: 1,
-    backgroundColor: '#FAFAFA',
-    borderWidth: 1,
-    borderColor: '#E4E4E7',
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    color: '#09090B',
-    fontSize: 13,
-    fontWeight: '500',
-  },
-  pinUnlockBtn: {
-    backgroundColor: '#09090B',
-    paddingHorizontal: 16,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  pinUnlockText: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  quickAccessLink: {
-    marginTop: 10,
-    paddingVertical: 4,
-  },
-  quickAccessLinkText: {
-    color: '#18181B',
-    fontSize: 12,
-    fontWeight: '500',
-  },
-  pinErrorText: {
-    color: '#DC2626',
-    fontSize: 12,
-    marginTop: 8,
-    fontWeight: '500',
-  },
-});
+const createStyles = (COLORS: ThemeColors) =>
+  StyleSheet.create({
+    /* Level 0: page background */
+    pageRoot: {
+      flex: 1,
+      backgroundColor: COLORS.pageBg,
+      ...(Platform.OS === 'web'
+        ? ({
+            minHeight: '100dvh',
+          } as object)
+        : {}),
+    },
+
+    /* 1. Header strip (64px, Level 1 bg, bottom hairline, 16px side padding) */
+    headerStrip: {
+      height: TOUCH_TARGET.headerHeight,
+      backgroundColor: COLORS.blockBg,
+      borderBottomWidth: 1,
+      borderBottomColor: COLORS.divider,
+      paddingHorizontal: SPACING.page,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+    },
+    headerStoreButton: {
+      flex: 1,
+      minWidth: 0,
+      minHeight: TOUCH_TARGET.min,
+      justifyContent: 'center',
+      paddingRight: SPACING.sm,
+    },
+    storeTitleRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.xs,
+    },
+    storeNameText: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.bodySize,
+      fontWeight: TYPOGRAPHY.weightMedium,
+      color: COLORS.text,
+      flexShrink: 1,
+    },
+    storeSubRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      marginTop: 2,
+    },
+    statusDot: {
+      width: 6,
+      height: 6,
+      borderRadius: RADIUS.full,
+      backgroundColor: COLORS.accent,
+    },
+    statusDotMuted: {
+      backgroundColor: COLORS.textSecondary,
+    },
+    storeCaptionText: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.captionSize,
+      fontWeight: TYPOGRAPHY.weightRegular,
+      color: COLORS.captionText,
+      flexShrink: 1,
+    },
+    headerRightActions: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+    },
+    profileTouchTarget: {
+      width: TOUCH_TARGET.min,
+      height: TOUCH_TARGET.min,
+      alignItems: 'flex-end',
+      justifyContent: 'center',
+    },
+    profileCircle: {
+      width: TOUCH_TARGET.avatarSize,
+      height: TOUCH_TARGET.avatarSize,
+      borderRadius: RADIUS.full,
+      backgroundColor: COLORS.surface,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    profileInitial: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.bodySize,
+      fontWeight: TYPOGRAPHY.weightSemibold,
+      color: COLORS.accent,
+    },
+
+    /* Offline banner strip */
+    offlineBanner: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.sm,
+      backgroundColor: COLORS.tagBg,
+      paddingHorizontal: SPACING.page,
+      paddingVertical: SPACING.sm,
+      borderBottomWidth: 1,
+      borderBottomColor: COLORS.divider,
+    },
+    offlineBannerText: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.captionSize,
+      fontWeight: TYPOGRAPHY.weightMedium,
+      color: COLORS.tagText,
+      flex: 1,
+    },
+
+    /* Scrollable Level-0 Canvas (12px side padding, 12px gap between blocks, bottom padding for sticky bar) */
+    scrollView: {
+      flex: 1,
+      backgroundColor: COLORS.pageBg,
+    },
+    scrollContent: {
+      paddingHorizontal: SPACING.pageSide,
+      paddingTop: SPACING.blockGap,
+      paddingBottom: 168,
+      gap: SPACING.blockGap,
+    },
+
+    /* 2. Start block (Level 1 block, radius 16, padding 20px 16px) */
+    startBlock: {
+      backgroundColor: COLORS.blockBg,
+      borderRadius: RADIUS.block,
+      paddingVertical: SPACING.blockPadV,
+      paddingHorizontal: SPACING.page,
+    },
+    startTitle: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.titleSize,
+      lineHeight: TYPOGRAPHY.titleLineHeight,
+      fontWeight: TYPOGRAPHY.weightSemibold,
+      color: COLORS.text,
+      marginBottom: SPACING.sm,
+    },
+    startBody: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.bodySize,
+      lineHeight: TYPOGRAPHY.bodyLineHeight,
+      fontWeight: TYPOGRAPHY.weightRegular,
+      color: COLORS.textSecondary,
+      marginBottom: SPACING.blockPadV,
+    },
+    stepsRow: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      justifyContent: 'space-between',
+    },
+    stepItem: {
+      flex: 1,
+      alignItems: 'center',
+      gap: SPACING.sm,
+    },
+    stepIconCircle: {
+      width: TOUCH_TARGET.stepCircleSize,
+      height: TOUCH_TARGET.stepCircleSize,
+      borderRadius: RADIUS.full,
+      backgroundColor: COLORS.tagBg,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    stepLabel: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.captionSize,
+      lineHeight: TYPOGRAPHY.captionLineHeight,
+      fontWeight: TYPOGRAPHY.weightRegular,
+      color: COLORS.captionText,
+      textAlign: 'center',
+    },
+    resumeCartTile: {
+      minHeight: 56,
+      backgroundColor: COLORS.surface,
+      borderRadius: RADIUS.card,
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.sm,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: SPACING.sm,
+    },
+    resumeCartLeft: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.md,
+      flex: 1,
+      minWidth: 0,
+    },
+    resumeCartText: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.bodySize,
+      fontWeight: TYPOGRAPHY.weightSemibold,
+      color: COLORS.text,
+      flexShrink: 1,
+    },
+
+    /* 3. Offers block (Level 1 block, radius 16, padding 16) */
+    offersBlock: {
+      backgroundColor: COLORS.blockBg,
+      borderRadius: RADIUS.block,
+      padding: SPACING.page,
+    },
+    offersHeaderRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: SPACING.md,
+    },
+    sectionHeading: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.sectionHeadingSize,
+      lineHeight: TYPOGRAPHY.sectionHeadingLineHeight,
+      fontWeight: TYPOGRAPHY.weightSemibold,
+      color: COLORS.text,
+    },
+    seeAllHeaderTouch: {
+      minHeight: TOUCH_TARGET.min,
+      justifyContent: 'center',
+      paddingLeft: SPACING.sm,
+    },
+    seeAllHeaderLink: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.bodySize,
+      fontWeight: TYPOGRAPHY.weightRegular,
+      color: COLORS.accent,
+    },
+
+    /* 2-column grid, gap 12 */
+    offersGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: SPACING.blockGap,
+    },
+    offerCard: {
+      flexGrow: 1,
+      flexBasis: '46%',
+      maxWidth: '48.5%',
+      backgroundColor: COLORS.surface,
+      borderRadius: RADIUS.card,
+      padding: SPACING.sm,
+    },
+    monogramTile: {
+      height: 84,
+      backgroundColor: COLORS.tile,
+      borderRadius: RADIUS.tile,
+      alignItems: 'center',
+      justifyContent: 'center',
+      position: 'relative',
+      marginBottom: SPACING.sm,
+    },
+    monogramLetters: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.monogramSize,
+      fontWeight: TYPOGRAPHY.weightSemibold,
+      color: COLORS.accent,
+    },
+    discountTagPill: {
+      position: 'absolute',
+      top: 6,
+      left: 6,
+      backgroundColor: COLORS.tagBg,
+      paddingHorizontal: SPACING.sm,
+      paddingVertical: 2,
+      borderRadius: RADIUS.full,
+    },
+    discountTagText: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.captionSize,
+      fontWeight: TYPOGRAPHY.weightMedium,
+      color: COLORS.tagText,
+    },
+    offerName: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.bodySize,
+      lineHeight: 20,
+      fontWeight: TYPOGRAPHY.weightRegular,
+      color: COLORS.text,
+      minHeight: 40,
+      marginBottom: 2,
+    },
+    offerWeight: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.captionSize,
+      fontWeight: TYPOGRAPHY.weightRegular,
+      color: COLORS.textSecondary,
+      marginBottom: 4,
+    },
+    offerPriceRow: {
+      flexDirection: 'row',
+      alignItems: 'baseline',
+      gap: 6,
+    },
+    offerPrice: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.bodySize,
+      fontWeight: TYPOGRAPHY.weightSemibold,
+      color: COLORS.text,
+    },
+    offerOldPrice: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.captionSize,
+      fontWeight: TYPOGRAPHY.weightRegular,
+      color: COLORS.textSecondary,
+      textDecorationLine: 'line-through',
+    },
+    offerDealLine: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.captionSize,
+      fontWeight: TYPOGRAPHY.weightMedium,
+      color: COLORS.accent,
+      marginTop: 4,
+    },
+
+    /* Last grid tile: bordered "See all offers >" link (the ONLY bordered element) */
+    seeAllGridTile: {
+      flexGrow: 1,
+      flexBasis: '46%',
+      maxWidth: '48.5%',
+      minHeight: 176,
+      backgroundColor: COLORS.surface,
+      borderRadius: RADIUS.card,
+      borderWidth: 1,
+      borderColor: COLORS.divider,
+      padding: SPACING.sm,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    seeAllGridInner: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 4,
+    },
+    seeAllGridText: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.bodySize,
+      fontWeight: TYPOGRAPHY.weightSemibold,
+      color: COLORS.accent,
+    },
+
+    /* Skeleton loading placeholders */
+    monogramTileSkeleton: {
+      height: 84,
+      backgroundColor: COLORS.tile,
+      borderRadius: RADIUS.tile,
+      marginBottom: SPACING.sm,
+    },
+    skeletonTextWide: {
+      width: '85%',
+      height: 14,
+      borderRadius: 4,
+      backgroundColor: COLORS.tile,
+      marginBottom: 6,
+    },
+    skeletonTextShort: {
+      width: '45%',
+      height: 12,
+      borderRadius: 4,
+      backgroundColor: COLORS.tile,
+      marginBottom: 8,
+    },
+    skeletonPrice: {
+      width: '55%',
+      height: 16,
+      borderRadius: 4,
+      backgroundColor: COLORS.tile,
+    },
+
+    /* 4. Bottom action bar (Level 1 bg, top hairline, padding 12px 16px, sticky bottom 0) */
+    bottomActionBar: {
+      backgroundColor: COLORS.blockBg,
+      borderTopWidth: 1,
+      borderTopColor: COLORS.divider,
+      paddingTop: SPACING.md,
+      paddingHorizontal: SPACING.page,
+      paddingBottom: SPACING.page,
+      ...(Platform.OS === 'web'
+        ? ({
+            position: 'sticky',
+            bottom: 0,
+            left: 0,
+            right: 0,
+            zIndex: 20,
+            paddingBottom: 'calc(16px + env(safe-area-inset-bottom))',
+          } as object)
+        : {}),
+    },
+    primaryButton: {
+      height: TOUCH_TARGET.primaryButtonHeight,
+      backgroundColor: COLORS.primaryButtonBg,
+      borderRadius: RADIUS.button,
+      alignItems: 'center',
+      justifyContent: 'center',
+      width: '100%',
+    },
+    primaryButtonDisabled: {
+      opacity: 0.45,
+    },
+    primaryButtonLabel: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.bodySize,
+      fontWeight: TYPOGRAPHY.weightSemibold,
+      color: COLORS.white,
+    },
+    familyLinkRow: {
+      height: TOUCH_TARGET.min,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: SPACING.sm,
+    },
+    familyLinkText: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.bodySize,
+      fontWeight: TYPOGRAPHY.weightRegular,
+      color: COLORS.accent,
+    },
+    securityCaptionRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+    },
+    securityCaptionText: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.captionSize,
+      fontWeight: TYPOGRAPHY.weightRegular,
+      color: COLORS.captionText,
+    },
+
+    /* Modals */
+    modalBackdrop: {
+      flex: 1,
+      backgroundColor: 'rgba(11, 15, 23, 0.55)',
+      justifyContent: 'flex-end',
+    },
+    modalSheet: {
+      backgroundColor: COLORS.blockBg,
+      borderTopLeftRadius: RADIUS.block,
+      borderTopRightRadius: RADIUS.block,
+      padding: SPACING.page,
+      paddingBottom: SPACING.section,
+      width: '100%',
+      maxWidth: 480,
+      alignSelf: 'center',
+    },
+    modalHeader: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      justifyContent: 'space-between',
+      marginBottom: SPACING.page,
+      gap: SPACING.md,
+    },
+    modalTitle: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.titleSize,
+      lineHeight: TYPOGRAPHY.titleLineHeight,
+      fontWeight: TYPOGRAPHY.weightSemibold,
+      color: COLORS.text,
+    },
+    modalSubtitle: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.bodySize,
+      lineHeight: TYPOGRAPHY.bodyLineHeight,
+      fontWeight: TYPOGRAPHY.weightRegular,
+      color: COLORS.textSecondary,
+      marginTop: 4,
+    },
+    iconTouch: {
+      width: TOUCH_TARGET.min,
+      height: TOUCH_TARGET.min,
+      alignItems: 'flex-end',
+      justifyContent: 'center',
+    },
+    locationDetectTile: {
+      minHeight: TOUCH_TARGET.min,
+      backgroundColor: COLORS.surface,
+      borderRadius: RADIUS.card,
+      paddingHorizontal: SPACING.page,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.sm,
+      marginBottom: SPACING.md,
+    },
+    locationDetectText: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.bodySize,
+      fontWeight: TYPOGRAPHY.weightMedium,
+      color: COLORS.accent,
+    },
+    modalListGroup: {
+      backgroundColor: COLORS.surface,
+      borderRadius: RADIUS.card,
+      paddingHorizontal: SPACING.page,
+    },
+    modalListRow: {
+      minHeight: 52,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingVertical: SPACING.md,
+      gap: SPACING.md,
+    },
+    modalListRowDivider: {
+      borderTopWidth: 1,
+      borderTopColor: COLORS.divider,
+    },
+    modalListRowTitle: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.bodySize,
+      fontWeight: TYPOGRAPHY.weightRegular,
+      color: COLORS.text,
+    },
+    modalListRowTitleSelected: {
+      color: COLORS.accent,
+      fontWeight: TYPOGRAPHY.weightSemibold,
+    },
+    modalListRowSub: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.captionSize,
+      fontWeight: TYPOGRAPHY.weightRegular,
+      color: COLORS.textSecondary,
+      marginTop: 2,
+    },
+    clearStoreTouch: {
+      minHeight: TOUCH_TARGET.min,
+      alignItems: 'center',
+      justifyContent: 'center',
+      marginTop: SPACING.sm,
+    },
+    clearStoreText: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.captionSize,
+      fontWeight: TYPOGRAPHY.weightRegular,
+      color: COLORS.textSecondary,
+    },
+    menuItemLabel: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.bodySize,
+      fontWeight: TYPOGRAPHY.weightRegular,
+      color: COLORS.text,
+      flex: 1,
+    },
+    familyActiveBox: {
+      backgroundColor: COLORS.surface,
+      borderRadius: RADIUS.card,
+      padding: SPACING.page,
+      alignItems: 'center',
+    },
+    familyPinCaption: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.captionSize,
+      fontWeight: TYPOGRAPHY.weightRegular,
+      color: COLORS.textSecondary,
+      marginBottom: 4,
+    },
+    familyPinDisplay: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.titleSize,
+      fontWeight: TYPOGRAPHY.weightSemibold,
+      color: COLORS.text,
+      letterSpacing: 2,
+      marginBottom: 4,
+    },
+    familyMembersCaption: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.captionSize,
+      fontWeight: TYPOGRAPHY.weightRegular,
+      color: COLORS.textSecondary,
+      marginBottom: SPACING.page,
+    },
+    unlinkFamilyTouch: {
+      minHeight: TOUCH_TARGET.min,
+      alignItems: 'center',
+      justifyContent: 'center',
+      marginTop: SPACING.sm,
+    },
+    unlinkFamilyText: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.bodySize,
+      fontWeight: TYPOGRAPHY.weightRegular,
+      color: COLORS.danger,
+    },
+    familyFormArea: {
+      gap: SPACING.page,
+    },
+    orDividerRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.md,
+    },
+    orLine: {
+      flex: 1,
+      height: 1,
+      backgroundColor: COLORS.divider,
+    },
+    orText: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.captionSize,
+      fontWeight: TYPOGRAPHY.weightRegular,
+      color: COLORS.textSecondary,
+    },
+    pinInputRow: {
+      flexDirection: 'row',
+      gap: SPACING.sm,
+    },
+    pinInput: {
+      flex: 1,
+      height: TOUCH_TARGET.min,
+      backgroundColor: COLORS.surface,
+      borderRadius: RADIUS.card,
+      paddingHorizontal: SPACING.page,
+      fontFamily: FONTS.sans,
+      fontSize: 16, // >= 16px to prevent iOS Safari zoom
+      fontWeight: TYPOGRAPHY.weightRegular,
+      color: COLORS.text,
+    },
+    pinJoinButton: {
+      height: TOUCH_TARGET.min,
+      paddingHorizontal: SPACING.section,
+      backgroundColor: COLORS.primaryButtonBg,
+      borderRadius: RADIUS.card,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    helpStepsList: {
+      gap: SPACING.md,
+      marginBottom: SPACING.section,
+    },
+    helpStepTile: {
+      backgroundColor: COLORS.surface,
+      borderRadius: RADIUS.card,
+      padding: SPACING.page,
+    },
+    helpStepHeading: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.bodySize,
+      fontWeight: TYPOGRAPHY.weightSemibold,
+      color: COLORS.text,
+      marginBottom: 4,
+    },
+    helpStepCopy: {
+      fontFamily: FONTS.sans,
+      fontSize: TYPOGRAPHY.bodySize,
+      lineHeight: TYPOGRAPHY.bodyLineHeight,
+      fontWeight: TYPOGRAPHY.weightRegular,
+      color: COLORS.textSecondary,
+    },
+  });

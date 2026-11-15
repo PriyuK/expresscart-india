@@ -15,9 +15,14 @@ import {
 const HMAC_SECRET =
   process.env.EXPRESSCART_HMAC_SECRET || 'expresscart-india-hmac-secret-2026';
 
+export type UserRole = 'SHOPPER' | 'STORE_STAFF';
+
 export interface BackendUserProfile {
   name: string;
   phone: string;
+  role?: UserRole;
+  employeeId?: string;
+  assignedStore?: string;
   isVerified: boolean;
   aadhaarLast4?: string;
   trustScore: number;
@@ -69,9 +74,19 @@ export interface BackendExitPass {
   allPaidItems?: any[];
   securityFlags?: any[];
   actualPhysicalItemsInCart?: string[];
+  exitVerified?: boolean;
+  verifiedByStaffId?: string;
+  verifiedAt?: string;
+  requiresCounterCheckout?: boolean;
+  verificationMode?: 'QR_GATE_SCAN' | 'PHYSICAL_COUNTER_BILL' | 'COUNTER_HANDOFF';
+  counterStatus?: 'NONE' | 'SENT_TO_COUNTER' | 'CLEARED_PHYSICAL_BILL';
+  physicalBillRef?: string;
+  counterResolutionType?:
+    | 'COUNTER_HANDOFF_PAID'
+    | 'COUNTER_ADDON_PAID'
+    | 'COUNTER_FULL_REBILL_REFUND';
 }
 
-// Lazy PostgreSQL connection (safe at build time when DATABASE_URL is not yet injected)
 let _pgInitialized = false;
 
 function getDatabaseUrl(): string | null {
@@ -85,8 +100,8 @@ function getSql() {
 }
 
 /**
- * Automatically creates PostgreSQL tables and seeds the initial stores, 18 products,
- * and demo verified shopper on first connection.
+ * Automatically creates PostgreSQL tables and seeds the initial stores, products,
+ * and default users on first connection.
  */
 async function ensurePostgresSchemaAndSeed(): Promise<boolean> {
   const sql = getSql();
@@ -138,6 +153,9 @@ async function ensurePostgresSchemaAndSeed(): Promise<boolean> {
       CREATE TABLE IF NOT EXISTS users (
         phone TEXT PRIMARY KEY,
         name TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'SHOPPER',
+        employee_id TEXT,
+        assigned_store TEXT,
         is_verified BOOLEAN NOT NULL DEFAULT TRUE,
         aadhaar_last4 TEXT,
         trust_score INTEGER NOT NULL DEFAULT 95,
@@ -145,6 +163,13 @@ async function ensurePostgresSchemaAndSeed(): Promise<boolean> {
         verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `;
+
+    // Ensure role & employee_id columns exist if table was created earlier
+    try {
+      await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'SHOPPER'`;
+      await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS employee_id TEXT`;
+      await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS assigned_store TEXT`;
+    } catch {}
 
     await sql`
       CREATE TABLE IF NOT EXISTS family_sessions (
@@ -187,14 +212,37 @@ async function ensurePostgresSchemaAndSeed(): Promise<boolean> {
         security_flags JSONB NOT NULL DEFAULT '[]'::jsonb,
         actual_physical_items JSONB NOT NULL DEFAULT '[]'::jsonb,
         exit_verified BOOLEAN NOT NULL DEFAULT FALSE,
+        verified_by_staff_id TEXT,
+        verified_at TIMESTAMPTZ,
+        requires_counter_checkout BOOLEAN NOT NULL DEFAULT FALSE,
+        verification_mode TEXT,
+        counter_status TEXT,
+        physical_bill_ref TEXT,
+        counter_resolution_type TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `;
 
-    // Seed default verified user if not exists
+    try {
+      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS verified_by_staff_id TEXT`;
+      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ`;
+      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS requires_counter_checkout BOOLEAN NOT NULL DEFAULT FALSE`;
+      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS verification_mode TEXT`;
+      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS counter_status TEXT`;
+      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS physical_bill_ref TEXT`;
+      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS counter_resolution_type TEXT`;
+    } catch {}
+
+    // Seed default verified customer and store staff accounts
     await sql`
-      INSERT INTO users (phone, name, is_verified, aadhaar_last4, trust_score, wallet_balance)
-      VALUES ('9820411290', 'Aarav Sharma', TRUE, '8492', 98, 1500)
+      INSERT INTO users (phone, name, role, is_verified, aadhaar_last4, trust_score, wallet_balance)
+      VALUES ('9820411290', 'Aarav Sharma', 'SHOPPER', TRUE, '8492', 98, 1500)
+      ON CONFLICT (phone) DO NOTHING
+    `;
+
+    await sql`
+      INSERT INTO users (phone, name, role, employee_id, assigned_store, is_verified, trust_score, wallet_balance)
+      VALUES ('9820099100', 'Rajesh Deshmukh (Gate Staff)', 'STORE_STAFF', 'EMP-101', 'Reliance/DMart Express Pilot - Store #01', TRUE, 100, 0)
       ON CONFLICT (phone) DO NOTHING
     `;
 
@@ -241,6 +289,7 @@ const LOCAL_DB_FILE = path.join(os.tmpdir(), 'expresscart-india-backend-db.json'
 
 interface LocalFallbackDb {
   usersByPhone: Record<string, BackendUserProfile>;
+  productsByBarcode: Record<string, BackendCatalogItem>;
   familyRoomsByPin: Record<string, BackendFamilyRoom>;
   ordersById: Record<string, BackendExitPass>;
 }
@@ -249,7 +298,12 @@ function loadLocalDb(): LocalFallbackDb {
   try {
     if (fs.existsSync(LOCAL_DB_FILE)) {
       const parsed = JSON.parse(fs.readFileSync(LOCAL_DB_FILE, 'utf-8'));
-      if (parsed && parsed.usersByPhone) return parsed;
+      if (parsed && parsed.usersByPhone) {
+        if (!parsed.productsByBarcode) {
+          parsed.productsByBarcode = { ...SEED_PRODUCTS_BY_BARCODE };
+        }
+        return parsed;
+      }
     }
   } catch {}
   const initial: LocalFallbackDb = {
@@ -257,13 +311,26 @@ function loadLocalDb(): LocalFallbackDb {
       '9820411290': {
         name: 'Aarav Sharma',
         phone: '9820411290',
+        role: 'SHOPPER',
         isVerified: true,
         aadhaarLast4: '8492',
         trustScore: 98,
         walletBalance: 1500,
         verifiedAt: new Date().toISOString(),
       },
+      '9820099100': {
+        name: 'Rajesh Deshmukh (Gate Staff)',
+        phone: '9820099100',
+        role: 'STORE_STAFF',
+        employeeId: 'EMP-101',
+        assignedStore: 'Reliance/DMart Express Pilot - Store #01',
+        isVerified: true,
+        trustScore: 100,
+        walletBalance: 0,
+        verifiedAt: new Date().toISOString(),
+      },
     },
+    productsByBarcode: { ...SEED_PRODUCTS_BY_BARCODE },
     familyRoomsByPin: {},
     ordersById: {},
   };
@@ -302,7 +369,7 @@ export async function getDatabaseHealth() {
     connected: true,
     usersCount: Object.keys(local.usersByPhone).length,
     ordersCount: Object.keys(local.ordersById).length,
-    productsCount: SEED_PRODUCTS.length,
+    productsCount: Object.keys(local.productsByBarcode).length,
   };
 }
 
@@ -340,7 +407,93 @@ export async function dbGetCatalogAndStores(): Promise<{
       return { stores: SEED_STORES, products, source: 'POSTGRESQL' };
     }
   }
-  return { stores: SEED_STORES, products: SEED_PRODUCTS, source: 'SEED_CACHE' };
+  const local = loadLocalDb();
+  const products = Object.values(local.productsByBarcode);
+  return {
+    stores: SEED_STORES,
+    products: products.length > 0 ? products : SEED_PRODUCTS,
+    source: 'SEED_CACHE',
+  };
+}
+
+export async function dbUpsertProduct(
+  product: BackendCatalogItem
+): Promise<BackendCatalogItem> {
+  const pgReady = await ensurePostgresSchemaAndSeed();
+  if (pgReady) {
+    const sql = getSql()!;
+    await sql`
+      INSERT INTO products (
+        barcode, name, brand, unit, category, mrp, store_price, weight_grams,
+        emoji, bg_color, accent_color, aisle, gst_percent, offer_type, offer_tag,
+        package_color_hex, package_color_name, is_quick_test, is_high_value_audit
+      ) VALUES (
+        ${product.barcode}, ${product.name}, ${product.brand}, ${product.unit}, ${product.category},
+        ${product.mrp}, ${product.storePrice}, ${product.weightGrams},
+        ${product.emoji || 'SK'}, ${product.bgColor || '#F4F4F5'}, ${product.accentColor || '#18181B'},
+        ${product.aisle || 'Aisle 01'}, ${product.gstPercent ?? 12},
+        ${product.offerType || 'NONE'}, ${product.offerTag || null},
+        ${product.packageColorHex || '#10B981'}, ${product.packageColorName || 'Standard Pack'},
+        ${Boolean(product.isQuickTest)}, ${Boolean(product.isHighValueAudit)}
+      )
+      ON CONFLICT (barcode) DO UPDATE SET
+        name = EXCLUDED.name,
+        brand = EXCLUDED.brand,
+        unit = EXCLUDED.unit,
+        category = EXCLUDED.category,
+        mrp = EXCLUDED.mrp,
+        store_price = EXCLUDED.store_price,
+        weight_grams = EXCLUDED.weight_grams,
+        aisle = EXCLUDED.aisle,
+        gst_percent = EXCLUDED.gst_percent,
+        offer_type = EXCLUDED.offer_type,
+        offer_tag = EXCLUDED.offer_tag,
+        package_color_hex = EXCLUDED.package_color_hex,
+        package_color_name = EXCLUDED.package_color_name,
+        is_high_value_audit = EXCLUDED.is_high_value_audit
+    `;
+  }
+  const local = loadLocalDb();
+  local.productsByBarcode[product.barcode] = product;
+  saveLocalDb(local);
+  return product;
+}
+
+export async function dbGetProductByBarcode(
+  barcode: string
+): Promise<BackendCatalogItem | null> {
+  const clean = String(barcode || '').trim();
+  const pgReady = await ensurePostgresSchemaAndSeed();
+  if (pgReady) {
+    const sql = getSql()!;
+    const rows = await sql`SELECT * FROM products WHERE barcode = ${clean} LIMIT 1`;
+    if (rows.length > 0) {
+      const r: any = rows[0];
+      return {
+        barcode: r.barcode,
+        name: r.name,
+        brand: r.brand,
+        unit: r.unit,
+        category: r.category,
+        mrp: Number(r.mrp),
+        storePrice: Number(r.store_price),
+        weightGrams: Number(r.weight_grams),
+        emoji: r.emoji,
+        bgColor: r.bg_color,
+        accentColor: r.accent_color,
+        aisle: r.aisle,
+        gstPercent: Number(r.gst_percent),
+        offerType: r.offer_type,
+        offerTag: r.offer_tag || undefined,
+        packageColorHex: r.package_color_hex,
+        packageColorName: r.package_color_name,
+        isQuickTest: Boolean(r.is_quick_test),
+        isHighValueAudit: Boolean(r.is_high_value_audit),
+      };
+    }
+  }
+  const local = loadLocalDb();
+  return local.productsByBarcode[clean] || SEED_PRODUCTS_BY_BARCODE[clean] || null;
 }
 
 export async function dbGetUser(phone: string): Promise<BackendUserProfile | null> {
@@ -354,6 +507,9 @@ export async function dbGetUser(phone: string): Promise<BackendUserProfile | nul
       return {
         phone: r.phone,
         name: r.name,
+        role: (r.role as UserRole) || 'SHOPPER',
+        employeeId: r.employee_id || undefined,
+        assignedStore: r.assigned_store || undefined,
         isVerified: Boolean(r.is_verified),
         aadhaarLast4: r.aadhaar_last4 || undefined,
         trustScore: Number(r.trust_score),
@@ -369,14 +525,29 @@ export async function dbGetUser(phone: string): Promise<BackendUserProfile | nul
 
 export async function dbUpsertUser(user: BackendUserProfile): Promise<BackendUserProfile> {
   const cleanPhone = user.phone.replace(/\D/g, '').slice(-10);
+  const role = user.role || 'SHOPPER';
   const pgReady = await ensurePostgresSchemaAndSeed();
   if (pgReady) {
     const sql = getSql()!;
     await sql`
-      INSERT INTO users (phone, name, is_verified, aadhaar_last4, trust_score, wallet_balance, verified_at)
-      VALUES (${cleanPhone}, ${user.name}, ${user.isVerified}, ${user.aadhaarLast4 || null}, ${user.trustScore}, ${user.walletBalance}, NOW())
+      INSERT INTO users (phone, name, role, employee_id, assigned_store, is_verified, aadhaar_last4, trust_score, wallet_balance, verified_at)
+      VALUES (
+        ${cleanPhone},
+        ${user.name},
+        ${role},
+        ${user.employeeId || null},
+        ${user.assignedStore || null},
+        ${user.isVerified},
+        ${user.aadhaarLast4 || null},
+        ${user.trustScore},
+        ${user.walletBalance},
+        NOW()
+      )
       ON CONFLICT (phone) DO UPDATE SET
         name = EXCLUDED.name,
+        role = EXCLUDED.role,
+        employee_id = COALESCE(EXCLUDED.employee_id, users.employee_id),
+        assigned_store = COALESCE(EXCLUDED.assigned_store, users.assigned_store),
         is_verified = EXCLUDED.is_verified,
         aadhaar_last4 = COALESCE(EXCLUDED.aadhaar_last4, users.aadhaar_last4),
         trust_score = EXCLUDED.trust_score,
@@ -384,9 +555,9 @@ export async function dbUpsertUser(user: BackendUserProfile): Promise<BackendUse
     `;
   }
   const local = loadLocalDb();
-  local.usersByPhone[cleanPhone] = user;
+  local.usersByPhone[cleanPhone] = { ...user, role };
   saveLocalDb(local);
-  return user;
+  return { ...user, role };
 }
 
 export async function dbGetFamilyRoom(pinCode: string): Promise<BackendFamilyRoom | null> {
@@ -463,7 +634,8 @@ export async function dbSaveOrder(pass: BackendExitPass): Promise<BackendExitPas
         payment_method, upi_ref, signature, total_price, total_mrp, total_savings, promo_savings,
         total_item_count, cart_weight_grams, is_family_order, family_session_code,
         cart1_item_count, cart1_weight_grams, cart2_item_count, cart2_weight_grams,
-        audit_items, all_paid_items, security_flags, actual_physical_items
+        audit_items, all_paid_items, security_flags, actual_physical_items, exit_verified,
+        requires_counter_checkout, verification_mode, counter_status, physical_bill_ref, counter_resolution_type
       ) VALUES (
         ${pass.orderId},
         ${pass.storeName},
@@ -488,9 +660,21 @@ export async function dbSaveOrder(pass: BackendExitPass): Promise<BackendExitPas
         ${JSON.stringify(pass.auditItems)}::jsonb,
         ${JSON.stringify(pass.allPaidItems || [])}::jsonb,
         ${JSON.stringify(pass.securityFlags || [])}::jsonb,
-        ${JSON.stringify(pass.actualPhysicalItemsInCart || [])}::jsonb
+        ${JSON.stringify(pass.actualPhysicalItemsInCart || [])}::jsonb,
+        ${Boolean(pass.exitVerified)},
+        ${Boolean(pass.requiresCounterCheckout)},
+        ${pass.verificationMode || 'QR_GATE_SCAN'},
+        ${pass.counterStatus || 'NONE'},
+        ${pass.physicalBillRef || null},
+        ${pass.counterResolutionType || null}
       )
-      ON CONFLICT (order_id) DO NOTHING
+      ON CONFLICT (order_id) DO UPDATE SET
+        exit_verified = EXCLUDED.exit_verified,
+        requires_counter_checkout = EXCLUDED.requires_counter_checkout,
+        verification_mode = EXCLUDED.verification_mode,
+        counter_status = EXCLUDED.counter_status,
+        physical_bill_ref = EXCLUDED.physical_bill_ref,
+        counter_resolution_type = EXCLUDED.counter_resolution_type
     `;
   }
   const local = loadLocalDb();
@@ -499,79 +683,202 @@ export async function dbSaveOrder(pass: BackendExitPass): Promise<BackendExitPas
   return pass;
 }
 
+function mapRowToExitPass(r: any): BackendExitPass {
+  return {
+    type: 'EXPRESSCART_EXIT_PASS',
+    orderId: r.order_id,
+    storeName: r.store_name,
+    timestamp: new Date(r.created_at).toISOString(),
+    upiRef: r.upi_ref,
+    paymentMethod: r.payment_method,
+    customerName: r.customer_name,
+    customerPhone: r.customer_phone,
+    customerTrustScore: Number(r.customer_trust_score),
+    signature: r.signature,
+    totalPrice: Number(r.total_price),
+    totalMrp: Number(r.total_mrp),
+    totalSavings: Number(r.total_savings),
+    promoSavings: Number(r.promo_savings),
+    totalItemCount: Number(r.total_item_count),
+    cartWeightGrams: Number(r.cart_weight_grams),
+    isFamilyOrder: Boolean(r.is_family_order),
+    familySessionCode: r.family_session_code || undefined,
+    cart1ItemCount: Number(r.cart1_item_count),
+    cart1WeightGrams: Number(r.cart1_weight_grams),
+    cart2ItemCount: Number(r.cart2_item_count),
+    cart2WeightGrams: Number(r.cart2_weight_grams),
+    auditItems: Array.isArray(r.audit_items) ? r.audit_items : [],
+    allPaidItems: Array.isArray(r.all_paid_items) ? r.all_paid_items : [],
+    securityFlags: Array.isArray(r.security_flags) ? r.security_flags : [],
+    actualPhysicalItemsInCart: Array.isArray(r.actual_physical_items)
+      ? r.actual_physical_items
+      : [],
+    exitVerified: Boolean(r.exit_verified),
+    verifiedByStaffId: r.verified_by_staff_id || undefined,
+    verifiedAt: r.verified_at ? new Date(r.verified_at).toISOString() : undefined,
+    requiresCounterCheckout: Boolean(r.requires_counter_checkout),
+    verificationMode: r.verification_mode || 'QR_GATE_SCAN',
+    counterStatus: r.counter_status || 'NONE',
+    physicalBillRef: r.physical_bill_ref || undefined,
+    counterResolutionType: r.counter_resolution_type || undefined,
+  };
+}
+
 export async function dbGetOrder(orderId: string): Promise<BackendExitPass | null> {
   const pgReady = await ensurePostgresSchemaAndSeed();
   if (pgReady) {
     const sql = getSql()!;
     const rows = await sql`SELECT * FROM orders WHERE order_id = ${orderId} LIMIT 1`;
     if (rows.length > 0) {
-      const r = rows[0];
-      return {
-        type: 'EXPRESSCART_EXIT_PASS',
-        orderId: r.order_id,
-        storeName: r.store_name,
-        timestamp: new Date(r.created_at).toISOString(),
-        upiRef: r.upi_ref,
-        paymentMethod: r.payment_method,
-        customerName: r.customer_name,
-        customerPhone: r.customer_phone,
-        customerTrustScore: Number(r.customer_trust_score),
-        signature: r.signature,
-        totalPrice: Number(r.total_price),
-        totalMrp: Number(r.total_mrp),
-        totalSavings: Number(r.total_savings),
-        promoSavings: Number(r.promo_savings),
-        totalItemCount: Number(r.total_item_count),
-        cartWeightGrams: Number(r.cart_weight_grams),
-        isFamilyOrder: Boolean(r.is_family_order),
-        familySessionCode: r.family_session_code || undefined,
-        cart1ItemCount: Number(r.cart1_item_count),
-        cart1WeightGrams: Number(r.cart1_weight_grams),
-        cart2ItemCount: Number(r.cart2_item_count),
-        cart2WeightGrams: Number(r.cart2_weight_grams),
-        auditItems: Array.isArray(r.audit_items) ? r.audit_items : [],
-        allPaidItems: Array.isArray(r.all_paid_items) ? r.all_paid_items : [],
-        securityFlags: Array.isArray(r.security_flags) ? r.security_flags : [],
-        actualPhysicalItemsInCart: Array.isArray(r.actual_physical_items)
-          ? r.actual_physical_items
-          : [],
-      };
+      return mapRowToExitPass(rows[0]);
     }
   }
   const local = loadLocalDb();
   return local.ordersById[orderId] || null;
 }
 
-export async function dbGetRecentOrders(): Promise<BackendExitPass[]> {
+export async function dbMarkOrderVerified(
+  orderId: string,
+  staffId: string
+): Promise<BackendExitPass | null> {
   const pgReady = await ensurePostgresSchemaAndSeed();
   if (pgReady) {
     const sql = getSql()!;
-    const rows = await sql`SELECT * FROM orders ORDER BY created_at DESC LIMIT 10`;
-    return rows.map((r: any) => ({
-      type: 'EXPRESSCART_EXIT_PASS',
-      orderId: r.order_id,
-      storeName: r.store_name,
-      timestamp: new Date(r.created_at).toISOString(),
-      upiRef: r.upi_ref,
-      paymentMethod: r.payment_method,
-      customerName: r.customer_name,
-      customerPhone: r.customer_phone,
-      customerTrustScore: Number(r.customer_trust_score),
-      signature: r.signature,
-      totalPrice: Number(r.total_price),
-      totalMrp: Number(r.total_mrp),
-      totalSavings: Number(r.total_savings),
-      promoSavings: Number(r.promo_savings),
-      totalItemCount: Number(r.total_item_count),
-      cartWeightGrams: Number(r.cart_weight_grams),
-      isFamilyOrder: Boolean(r.is_family_order),
-      auditItems: Array.isArray(r.audit_items) ? r.audit_items : [],
-      allPaidItems: Array.isArray(r.all_paid_items) ? r.all_paid_items : [],
-      securityFlags: Array.isArray(r.security_flags) ? r.security_flags : [],
-    }));
+    const rows = await sql`
+      UPDATE orders
+      SET
+        exit_verified = TRUE,
+        verification_mode = COALESCE(verification_mode, 'QR_GATE_SCAN'),
+        verified_by_staff_id = ${staffId},
+        verified_at = NOW()
+      WHERE order_id = ${orderId}
+      RETURNING *
+    `;
+    if (rows.length > 0) {
+      return mapRowToExitPass(rows[0]);
+    }
   }
   const local = loadLocalDb();
-  return Object.values(local.ordersById).slice(-10).reverse();
+  const existing = local.ordersById[orderId];
+  if (existing) {
+    existing.exitVerified = true;
+    existing.verificationMode =
+      existing.verificationMode === 'PHYSICAL_COUNTER_BILL'
+        ? 'PHYSICAL_COUNTER_BILL'
+        : 'QR_GATE_SCAN';
+    existing.verifiedByStaffId = staffId;
+    existing.verifiedAt = new Date().toISOString();
+    saveLocalDb(local);
+    return existing;
+  }
+  return null;
+}
+
+export async function dbSendOrderToCounter(
+  orderId: string
+): Promise<BackendExitPass | null> {
+  const pgReady = await ensurePostgresSchemaAndSeed();
+  if (pgReady) {
+    const sql = getSql()!;
+    const rows = await sql`
+      UPDATE orders
+      SET
+        requires_counter_checkout = TRUE,
+        verification_mode = 'COUNTER_HANDOFF',
+        counter_status = 'SENT_TO_COUNTER'
+      WHERE order_id = ${orderId}
+      RETURNING *
+    `;
+    if (rows.length > 0) {
+      return mapRowToExitPass(rows[0]);
+    }
+  }
+  const local = loadLocalDb();
+  const existing = local.ordersById[orderId];
+  if (existing) {
+    existing.requiresCounterCheckout = true;
+    existing.verificationMode = 'COUNTER_HANDOFF';
+    existing.counterStatus = 'SENT_TO_COUNTER';
+    saveLocalDb(local);
+    return existing;
+  }
+  return null;
+}
+
+export async function dbVerifyOrderWithPhysicalBill(params: {
+  orderId: string;
+  physicalBillRef: string;
+  resolutionType:
+    | 'COUNTER_HANDOFF_PAID'
+    | 'COUNTER_ADDON_PAID'
+    | 'COUNTER_FULL_REBILL_REFUND';
+  staffId: string;
+}): Promise<BackendExitPass | null> {
+  const pgReady = await ensurePostgresSchemaAndSeed();
+  if (pgReady) {
+    const sql = getSql()!;
+    const rows = await sql`
+      UPDATE orders
+      SET
+        exit_verified = TRUE,
+        requires_counter_checkout = TRUE,
+        verification_mode = 'PHYSICAL_COUNTER_BILL',
+        counter_status = 'CLEARED_PHYSICAL_BILL',
+        physical_bill_ref = ${params.physicalBillRef},
+        counter_resolution_type = ${params.resolutionType},
+        verified_by_staff_id = ${params.staffId},
+        verified_at = NOW()
+      WHERE order_id = ${params.orderId}
+      RETURNING *
+    `;
+    if (rows.length > 0) {
+      return mapRowToExitPass(rows[0]);
+    }
+  }
+  const local = loadLocalDb();
+  const existing = local.ordersById[params.orderId];
+  if (existing) {
+    const shouldRefund =
+      params.resolutionType === 'COUNTER_FULL_REBILL_REFUND' &&
+      !existing.requiresCounterCheckout &&
+      existing.paymentMethod !== 'Pay at Counter' &&
+      existing.counterStatus !== 'CLEARED_PHYSICAL_BILL';
+    if (shouldRefund && existing.customerPhone) {
+      const user = local.usersByPhone[existing.customerPhone];
+      if (user) {
+        user.walletBalance += existing.totalPrice || 0;
+      }
+    }
+    existing.exitVerified = true;
+    existing.requiresCounterCheckout = true;
+    existing.verificationMode = 'PHYSICAL_COUNTER_BILL';
+    existing.counterStatus = 'CLEARED_PHYSICAL_BILL';
+    existing.physicalBillRef = params.physicalBillRef;
+    existing.counterResolutionType = params.resolutionType;
+    existing.verifiedByStaffId = params.staffId;
+    existing.verifiedAt = new Date().toISOString();
+    saveLocalDb(local);
+    return existing;
+  }
+  return null;
+}
+
+export async function dbGetRecentOrders(phone?: string): Promise<BackendExitPass[]> {
+  const cleanPhone = phone ? phone.replace(/\D/g, '').slice(-10) : '';
+  const pgReady = await ensurePostgresSchemaAndSeed();
+  if (pgReady) {
+    const sql = getSql()!;
+    const rows = cleanPhone
+      ? await sql`SELECT * FROM orders WHERE customer_phone = ${cleanPhone} ORDER BY created_at DESC LIMIT 25`
+      : await sql`SELECT * FROM orders ORDER BY created_at DESC LIMIT 25`;
+    return rows.map(mapRowToExitPass);
+  }
+  const local = loadLocalDb();
+  const all = Object.values(local.ordersById).reverse();
+  if (cleanPhone) {
+    return all.filter((o) => o.customerPhone === cleanPhone).slice(0, 25);
+  }
+  return all.slice(0, 25);
 }
 
 export function signExitPassPayload(params: {
@@ -614,4 +921,3 @@ export {
   SEED_PRODUCTS_BY_BARCODE,
   computeBackendPromoDiscount,
 };
-

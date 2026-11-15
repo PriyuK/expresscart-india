@@ -4,11 +4,19 @@ import {
   Text,
   View,
   TouchableOpacity,
-  ScrollView,
+  TextInput,
 } from 'react-native';
 import { Html5Qrcode } from 'html5-qrcode';
-import { Camera, Plus, BatteryCharging, Eye } from 'lucide-react-native';
-import { QUICK_TEST_ITEMS, STORE_CATALOG } from '../data/mockStoreCatalog';
+import { Camera, ScanLine } from 'lucide-react-native';
+import {
+  COLORS,
+  FONTS,
+  TYPOGRAPHY,
+  SPACING,
+  RADIUS,
+  ICON,
+  TOUCH_TARGET,
+} from '../theme/tokens';
 
 export interface ScannerViewProps {
   onScan: (data: string) => void;
@@ -17,21 +25,19 @@ export interface ScannerViewProps {
   onWakeScanner?: () => void;
   cartTotalPrice?: number;
   cartItemCount?: number;
+  manualPlaceholder?: string;
 }
 
-const DEBOUNCE_MS = 1200;
+const DEBOUNCE_MS = 1000;
 const READER_ELEMENT_ID = 'expresscart-html5-qrcode-reader';
 
-/**
- * Plays a synthetic 880Hz retail scanner beep using the Web Audio API
- * (iOS Safari compatible, zero external audio assets required).
- */
 function play880HzBeep() {
   try {
     if (typeof window === 'undefined') return;
     const AudioCtx =
       window.AudioContext ||
-      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      (window as unknown as { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext;
     if (!AudioCtx) return;
 
     const ctx = new AudioCtx();
@@ -41,7 +47,7 @@ function play880HzBeep() {
     osc.type = 'sine';
     osc.frequency.setValueAtTime(880, ctx.currentTime);
 
-    gain.gain.setValueAtTime(0.18, ctx.currentTime);
+    gain.gain.setValueAtTime(0.16, ctx.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.14);
 
     osc.connect(gain);
@@ -64,6 +70,7 @@ export default function ScannerView({
   onWakeScanner,
   cartTotalPrice = 0,
   cartItemCount = 0,
+  manualPlaceholder = 'Enter barcode number',
 }: ScannerViewProps) {
   const lastScannedTime = useRef<number>(0);
   const scannerRef = useRef<Html5Qrcode | null>(null);
@@ -76,10 +83,12 @@ export default function ScannerView({
   const [cameraStarted, setCameraStarted] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [needsUserGesture, setNeedsUserGesture] = useState(false);
-  const [showAllDebug, setShowAllDebug] = useState(false);
+  const [manualBarcode, setManualBarcode] = useState('');
 
   const triggerScan = useCallback(
     (data: string) => {
+      const cleaned = data.trim();
+      if (!cleaned) return;
       const now = Date.now();
       if (now - lastScannedTime.current < DEBOUNCE_MS) {
         return;
@@ -94,13 +103,13 @@ export default function ScannerView({
       setCooldownActive(true);
       setTimeout(() => {
         if (isMountedRef.current) setFlashActive(false);
-      }, 200);
+      }, 220);
       setTimeout(() => {
         if (isMountedRef.current) setCooldownActive(false);
       }, DEBOUNCE_MS);
 
       play880HzBeep();
-      onScanRef.current(data);
+      onScanRef.current(cleaned);
     },
     [onWakeScanner]
   );
@@ -140,15 +149,13 @@ export default function ScannerView({
         { facingMode: 'environment' },
         {
           fps: 12,
-          qrbox: { width: 220, height: 100 },
+          qrbox: { width: 190, height: 68 },
           aspectRatio: 1.777,
         },
         (decodedText) => {
           triggerScan(decodedText);
         },
-        () => {
-          // Per-frame decode miss
-        }
+        () => {}
       );
 
       if (isMountedRef.current) {
@@ -161,8 +168,8 @@ export default function ScannerView({
         setNeedsUserGesture(true);
         setCameraError(
           msg.includes('NotAllowedError') || msg.includes('Permission')
-            ? 'Camera access requires browser permission.'
-            : 'Enable camera to scan physical barcodes, or tap any sample SKU below.'
+            ? 'Allow camera access to scan barcodes.'
+            : 'Point camera at a barcode or enter the number below.'
         );
       }
     }
@@ -189,11 +196,14 @@ export default function ScannerView({
     };
   }, [effectiveActiveScan, startCamera, stopCamera]);
 
-  const debugItems = showAllDebug ? STORE_CATALOG : QUICK_TEST_ITEMS;
+  const handleManualSubmit = () => {
+    if (!manualBarcode.trim()) return;
+    triggerScan(manualBarcode.trim());
+    setManualBarcode('');
+  };
 
   return (
-    <View style={[styles.container, flashActive && styles.containerFlashBorder]}>
-      {/* HTML5-QRCode DOM Mount Target */}
+    <View style={styles.container}>
       <View style={styles.readerContainer}>
         <div
           id={READER_ELEMENT_ID}
@@ -206,143 +216,81 @@ export default function ScannerView({
         />
       </View>
 
-      {/* STATE 1: OLED BLACK ECO SLEEP / CART ROLLING MODE */}
       {isRollingSleep ? (
         <TouchableOpacity
-          style={styles.oledEcoOverlay}
+          style={styles.standbyOverlay}
           activeOpacity={0.9}
           onPress={() => onWakeScanner && onWakeScanner()}
         >
-          <View style={styles.oledPillRow}>
-            <View style={styles.oledBatteryPill}>
-              <BatteryCharging size={12} color="#10B981" strokeWidth={2.2} />
-              <Text style={styles.oledBatteryText}>
-                OLED Eco Standby · ~5% Battery/Hr
-              </Text>
-            </View>
-            <View style={styles.oledWatchPill}>
-              <Eye size={11} color="#A1A1AA" strokeWidth={2} />
-              <Text style={styles.oledWatchText}>1 FPS Basket Watch ON</Text>
-            </View>
-          </View>
-
-          <Text style={styles.oledBigAmount}>
-            ₹{cartTotalPrice} · {cartItemCount} {cartItemCount === 1 ? 'item' : 'items'}
+          <Text style={styles.standbyPrice}>
+            ₹{cartTotalPrice} · {cartItemCount}{' '}
+            {cartItemCount === 1 ? 'item' : 'items'}
           </Text>
-          <Text style={styles.oledSubText}>
-            Barcode AI sleeping while cart rolls. Tap screen or pass item over handlebar to wake for 5s scan.
-          </Text>
+          <Text style={styles.standbySub}>Tap to resume scanning</Text>
         </TouchableOpacity>
       ) : !isScanning ? (
         <View style={styles.overlayBox}>
-          <View style={styles.pausedBadge}>
-            <Text style={styles.pausedBadgeText}>Standby Mode · Camera Paused</Text>
-          </View>
+          <ScanLine
+            size={ICON.size}
+            color={COLORS.textSecondary}
+            strokeWidth={ICON.strokeWidth}
+          />
           <Text style={styles.overlaySub}>
-            Resume camera to scan barcodes, or select an item from the quick-scan strip below.
+            Camera paused · Enter barcode number below
           </Text>
         </View>
       ) : !cameraStarted || needsUserGesture ? (
         <View style={styles.overlayBox}>
-          <View style={styles.reticlePreview}>
-            <View style={[styles.corner, styles.cornerTL]} />
-            <View style={[styles.corner, styles.cornerTR]} />
-            <View style={[styles.corner, styles.cornerBL]} />
-            <View style={[styles.corner, styles.cornerBR]} />
-            <TouchableOpacity
-              style={styles.startCameraBtn}
-              activeOpacity={0.8}
-              onPress={() => {
-                play880HzBeep();
-                startCamera();
-              }}
-            >
-              <Camera size={14} color="#09090B" strokeWidth={2} />
-              <Text style={styles.startCameraBtnText}>Tap to Start Handlebar Camera</Text>
-            </TouchableOpacity>
-          </View>
-          <Text style={styles.overlaySub}>
-            {cameraError ||
-              'Scan-to-Drop Tracking Active: Pass barcode over handlebar into basket.'}
+          <TouchableOpacity
+            style={styles.enableCameraBtn}
+            activeOpacity={0.85}
+            onPress={() => {
+              play880HzBeep();
+              startCamera();
+            }}
+          >
+            <Camera
+              size={ICON.size}
+              color={COLORS.white}
+              strokeWidth={ICON.strokeWidth}
+            />
+            <Text style={styles.enableCameraBtnText}>Enable camera</Text>
+          </TouchableOpacity>
+          <Text style={styles.overlaySub} numberOfLines={1}>
+            {cameraError || 'Point camera at a barcode or enter it below'}
           </Text>
         </View>
       ) : (
         <View style={styles.liveHud} pointerEvents="none">
-          <View style={[styles.reticle, flashActive && styles.reticleFlash]}>
-            <View style={[styles.corner, styles.cornerTL]} />
-            <View style={[styles.corner, styles.cornerTR]} />
-            <View style={[styles.corner, styles.cornerBL]} />
-            <View style={[styles.corner, styles.cornerBR]} />
-            <View style={[styles.scanLine, flashActive && styles.scanLineSuccess]} />
-          </View>
-          <View style={styles.liveHudPill}>
-            <View
-              style={[
-                styles.statusDot,
-                { backgroundColor: cooldownActive ? '#A1A1AA' : '#10B981' },
-              ]}
-            />
-            <Text style={styles.liveHudText}>
-              {cooldownActive
-                ? 'Drop Verified · Visual Signature Matched'
-                : 'Pass item over handlebar · 1.5s drop tracking'}
-            </Text>
-          </View>
+          <View style={[styles.reticle, flashActive && styles.reticleFlash]} />
+          <Text style={styles.liveHudText} numberOfLines={1}>
+            {cooldownActive ? 'Added to cart' : 'Center barcode in frame'}
+          </Text>
         </View>
       )}
 
-      {/* 200ms Bright Green Flash Overlay */}
-      {flashActive && <View style={styles.greenFlashOverlay} pointerEvents="none" />}
-
-      {/* Bottom Quick-Scan Bar */}
-      <View style={styles.quickScanBar}>
-        <View style={styles.quickScanHeader}>
-          <Text style={styles.quickScanLabel}>
-            QUICK SCAN SIMULATION (WORKS IN 0-SIGNAL DEAD ZONES)
-          </Text>
-          <TouchableOpacity
-            onPress={() => setShowAllDebug((v) => !v)}
-            activeOpacity={0.7}
-          >
-            <Text style={styles.quickScanToggle}>
-              {showAllDebug ? 'Show Featured' : `All ${STORE_CATALOG.length} SKUs`}
-            </Text>
-          </TouchableOpacity>
-        </View>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.quickScanScroll}
+      {/* Manual Barcode Input Bar */}
+      <View style={styles.manualEntryBar}>
+        <TextInput
+          style={styles.manualInput}
+          value={manualBarcode}
+          onChangeText={setManualBarcode}
+          placeholder={manualPlaceholder}
+          placeholderTextColor={COLORS.textSecondary}
+          onSubmitEditing={handleManualSubmit}
+          returnKeyType="done"
+        />
+        <TouchableOpacity
+          style={[
+            styles.manualSubmitBtn,
+            !manualBarcode.trim() && styles.manualSubmitBtnDisabled,
+          ]}
+          disabled={!manualBarcode.trim()}
+          onPress={handleManualSubmit}
+          activeOpacity={0.85}
         >
-          {debugItems.map((item) => (
-            <TouchableOpacity
-              key={item.barcode}
-              style={styles.skuChip}
-              onPress={() => triggerScan(item.barcode)}
-              activeOpacity={0.75}
-            >
-              <View
-                style={[
-                  styles.skuChipAddIcon,
-                  { borderLeftWidth: 3, borderLeftColor: item.packageColorHex },
-                ]}
-              >
-                <Plus size={12} color="#FAFAFA" strokeWidth={2.2} />
-              </View>
-              <View>
-                <Text style={styles.skuChipName} numberOfLines={1}>
-                  {item.name.split(' ').slice(0, 2).join(' ')} · {item.unit}
-                </Text>
-                <View style={styles.skuPriceRow}>
-                  <Text style={styles.skuChipPrice}>₹{item.storePrice}</Text>
-                  {item.mrp > item.storePrice && (
-                    <Text style={styles.skuChipMrp}>₹{item.mrp}</Text>
-                  )}
-                </View>
-              </View>
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
+          <Text style={styles.manualSubmitText}>Add</Text>
+        </TouchableOpacity>
       </View>
     </View>
   );
@@ -351,312 +299,147 @@ export default function ScannerView({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#000000',
+    backgroundColor: COLORS.surface,
     position: 'relative',
     overflow: 'hidden',
-    borderWidth: 2,
-    borderColor: 'transparent',
-  },
-  containerFlashBorder: {
-    borderColor: '#10B981',
   },
   readerContainer: {
     position: 'absolute',
     top: 0,
     right: 0,
-    bottom: 0,
+    bottom: 52,
     left: 0,
-    backgroundColor: '#000000',
+    backgroundColor: COLORS.textPrimary,
   },
-  oledEcoOverlay: {
+  standbyOverlay: {
     position: 'absolute',
     top: 0,
     right: 0,
-    bottom: 0,
+    bottom: 52,
     left: 0,
-    backgroundColor: '#000000',
+    backgroundColor: COLORS.surface,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 24,
-    paddingBottom: 68,
+    paddingHorizontal: SPACING.page,
   },
-  oledPillRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginBottom: 10,
-    flexWrap: 'wrap',
-    justifyContent: 'center',
+  standbyPrice: {
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.bodySize,
+    fontWeight: TYPOGRAPHY.weightSemibold,
+    color: COLORS.textPrimary,
+    marginBottom: SPACING.xs,
   },
-  oledBatteryPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    backgroundColor: '#091912',
-    borderWidth: 1,
-    borderColor: '#065F46',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 999,
-  },
-  oledBatteryText: {
-    color: '#10B981',
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  oledWatchPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    backgroundColor: '#18181B',
-    borderWidth: 1,
-    borderColor: '#27272A',
-    paddingHorizontal: 9,
-    paddingVertical: 4,
-    borderRadius: 999,
-  },
-  oledWatchText: {
-    color: '#A1A1AA',
-    fontSize: 10,
-    fontWeight: '600',
-  },
-  oledBigAmount: {
-    color: '#FAFAFA',
-    fontSize: 24,
-    fontWeight: '700',
-    letterSpacing: -0.5,
-    marginBottom: 4,
-  },
-  oledSubText: {
-    color: '#71717A',
-    fontSize: 11,
-    textAlign: 'center',
-    maxWidth: 340,
-    lineHeight: 16,
+  standbySub: {
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.captionSize,
+    fontWeight: TYPOGRAPHY.weightRegular,
+    color: COLORS.textSecondary,
   },
   overlayBox: {
     position: 'absolute',
     top: 0,
     right: 0,
-    bottom: 0,
+    bottom: 52,
     left: 0,
-    backgroundColor: '#09090B',
+    backgroundColor: COLORS.surface,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 24,
-    paddingBottom: 72,
+    paddingHorizontal: SPACING.page,
+    gap: SPACING.sm,
   },
-  reticlePreview: {
-    width: 236,
-    height: 76,
-    alignItems: 'center',
-    justifyContent: 'center',
-    position: 'relative',
-    marginBottom: 10,
-  },
-  overlaySub: {
-    color: '#71717A',
-    fontSize: 12,
-    textAlign: 'center',
-    maxWidth: 340,
-    lineHeight: 17,
-  },
-  pausedBadge: {
-    backgroundColor: '#18181B',
-    borderWidth: 1,
-    borderColor: '#27272A',
-    paddingHorizontal: 12,
-    paddingVertical: 5,
-    borderRadius: 999,
-    marginBottom: 8,
-  },
-  pausedBadgeText: {
-    color: '#D4D4D8',
-    fontSize: 11,
-    fontWeight: '500',
-  },
-  startCameraBtn: {
+  enableCameraBtn: {
+    minHeight: TOUCH_TARGET.min,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 7,
-    backgroundColor: '#FAFAFA',
-    paddingHorizontal: 16,
-    paddingVertical: 9,
-    borderRadius: 8,
+    gap: SPACING.sm,
+    backgroundColor: COLORS.accent,
+    paddingHorizontal: SPACING.page,
+    borderRadius: RADIUS.card,
   },
-  startCameraBtnText: {
-    color: '#09090B',
-    fontSize: 12,
-    fontWeight: '600',
+  enableCameraBtnText: {
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.bodySize,
+    fontWeight: TYPOGRAPHY.weightSemibold,
+    color: COLORS.white,
+  },
+  overlaySub: {
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.captionSize,
+    fontWeight: TYPOGRAPHY.weightRegular,
+    color: COLORS.textSecondary,
+    textAlign: 'center',
   },
   liveHud: {
     position: 'absolute',
     top: 0,
     right: 0,
-    bottom: 0,
+    bottom: 52,
     left: 0,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingBottom: 72,
+    gap: SPACING.sm,
   },
   reticle: {
-    width: 220,
-    height: 86,
-    borderRadius: 10,
-    position: 'relative',
-    alignItems: 'center',
-    justifyContent: 'center',
+    width: 196,
+    height: 64,
+    borderRadius: RADIUS.card,
+    borderWidth: 1.5,
+    borderColor: COLORS.white,
   },
   reticleFlash: {
-    backgroundColor: 'rgba(16, 185, 129, 0.18)',
-  },
-  corner: {
-    position: 'absolute',
-    width: 16,
-    height: 16,
-    borderColor: '#E4E4E7',
-  },
-  cornerTL: {
-    top: 0,
-    left: 0,
-    borderTopWidth: 2,
-    borderLeftWidth: 2,
-    borderTopLeftRadius: 6,
-  },
-  cornerTR: {
-    top: 0,
-    right: 0,
-    borderTopWidth: 2,
-    borderRightWidth: 2,
-    borderTopRightRadius: 6,
-  },
-  cornerBL: {
-    bottom: 0,
-    left: 0,
-    borderBottomWidth: 2,
-    borderLeftWidth: 2,
-    borderBottomLeftRadius: 6,
-  },
-  cornerBR: {
-    bottom: 0,
-    right: 0,
-    borderBottomWidth: 2,
-    borderRightWidth: 2,
-    borderBottomRightRadius: 6,
-  },
-  scanLine: {
-    width: '82%',
-    height: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.45)',
-  },
-  scanLineSuccess: {
-    backgroundColor: '#10B981',
-    height: 2,
-  },
-  liveHudPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(9, 9, 11, 0.85)',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 999,
-    marginTop: 8,
-    gap: 6,
-    borderWidth: 1,
-    borderColor: '#27272A',
-  },
-  statusDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
+    borderColor: COLORS.accent,
+    backgroundColor: 'rgba(11, 107, 79, 0.2)',
   },
   liveHudText: {
-    color: '#D4D4D8',
-    fontSize: 11,
-    fontWeight: '500',
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.captionSize,
+    fontWeight: TYPOGRAPHY.weightRegular,
+    color: COLORS.white,
+    backgroundColor: 'rgba(17, 24, 39, 0.65)',
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.xs,
+    borderRadius: RADIUS.full,
   },
-  greenFlashOverlay: {
-    position: 'absolute',
-    top: 0,
-    right: 0,
-    bottom: 0,
-    left: 0,
-    borderWidth: 4,
-    borderColor: '#10B981',
-    backgroundColor: 'rgba(16, 185, 129, 0.16)',
-  },
-  quickScanBar: {
+  manualEntryBar: {
     position: 'absolute',
     bottom: 0,
     left: 0,
     right: 0,
-    backgroundColor: '#121215',
+    height: 52,
+    backgroundColor: COLORS.background,
     borderTopWidth: 1,
-    borderTopColor: '#27272A',
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-  },
-  quickScanHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 6,
-  },
-  quickScanLabel: {
-    color: '#71717A',
-    fontSize: 9,
-    fontWeight: '700',
-    letterSpacing: 0.5,
-  },
-  quickScanToggle: {
-    color: '#D4D4D8',
-    fontSize: 11,
-    fontWeight: '500',
-  },
-  quickScanScroll: {
+    borderTopColor: COLORS.divider,
+    paddingHorizontal: SPACING.page,
     flexDirection: 'row',
     alignItems: 'center',
-    paddingRight: 8,
+    gap: SPACING.sm,
   },
-  skuChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#18181B',
-    borderWidth: 1,
-    borderColor: '#27272A',
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    marginRight: 8,
-    gap: 8,
+  manualInput: {
+    flex: 1,
+    height: 38,
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.card,
+    paddingHorizontal: SPACING.md,
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.bodySize,
+    fontWeight: TYPOGRAPHY.weightRegular,
+    color: COLORS.textPrimary,
   },
-  skuChipAddIcon: {
-    width: 22,
-    height: 22,
-    borderRadius: 6,
-    backgroundColor: '#27272A',
+  manualSubmitBtn: {
+    height: 38,
+    paddingHorizontal: SPACING.page,
+    backgroundColor: COLORS.accent,
+    borderRadius: RADIUS.card,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  skuChipName: {
-    color: '#F4F4F5',
-    fontSize: 11,
-    fontWeight: '500',
+  manualSubmitBtnDisabled: {
+    opacity: 0.4,
   },
-  skuPriceRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    marginTop: 1,
-  },
-  skuChipPrice: {
-    color: '#A1A1AA',
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  skuChipMrp: {
-    color: '#52525B',
-    fontSize: 10,
-    textDecorationLine: 'line-through',
+  manualSubmitText: {
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.bodySize,
+    fontWeight: TYPOGRAPHY.weightSemibold,
+    color: COLORS.white,
   },
 });

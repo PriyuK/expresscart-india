@@ -41,7 +41,7 @@ export const PILOT_STORE_BRANCHES: StoreBranch[] = [
   {
     id: 'store-mumbai-01',
     name: 'Reliance/DMart Express Pilot - Store #01',
-    shortName: 'DMart Express — Lower Parel #01',
+    shortName: 'DMart Express · Lower Parel',
     chain: 'DMart',
     city: 'Lower Parel, Mumbai',
     lane: 'Express Gate A',
@@ -53,7 +53,7 @@ export const PILOT_STORE_BRANCHES: StoreBranch[] = [
   {
     id: 'store-powai-04',
     name: 'DMart Ready Express - Powai #04',
-    shortName: 'DMart Ready — Powai #04',
+    shortName: 'DMart Ready · Powai',
     chain: 'DMart',
     city: 'Hiranandani, Powai',
     lane: 'Express Gate B',
@@ -65,7 +65,7 @@ export const PILOT_STORE_BRANCHES: StoreBranch[] = [
   {
     id: 'store-blr-09',
     name: 'Reliance Smart Point - Indiranagar #09',
-    shortName: 'Reliance Smart Point — Indiranagar #09',
+    shortName: 'Reliance Smart · Indiranagar',
     chain: 'Reliance Smart',
     city: '100 Ft Rd, Bengaluru',
     lane: 'Express Gate A',
@@ -187,7 +187,7 @@ export const STORE_CATALOG: CatalogItem[] = [
     gstPercent: 18,
     isQuickTest: true,
     offerType: 'BOGO',
-    offerTag: 'Buy 1 Get 1 Free (Mart Promo)',
+    offerTag: 'Buy 1 get 1 free',
     packageColorHex: '#F59E0B',
     packageColorName: 'Yellow & White Stripes',
   },
@@ -266,7 +266,7 @@ export const STORE_CATALOG: CatalogItem[] = [
     gstPercent: 12,
     isQuickTest: true,
     offerType: 'BOGO',
-    offerTag: 'Buy 1 Get 1 Free (Mart Promo)',
+    offerTag: 'Buy 1 get 1 free',
     packageColorHex: '#EF4444',
     packageColorName: 'Crimson Foil Pack',
   },
@@ -469,9 +469,9 @@ export function calculateOfflinePromoDiscount(
     return {
       promoDiscount,
       promoAppliedText:
-        freeUnits > 0 ? `BOGO Applied: ${freeUnits} free (-₹${promoDiscount})` : null,
+        freeUnits > 0 ? `Buy 1 get 1 free applied (-₹${promoDiscount})` : null,
       upsellHint: needsOneMore
-        ? 'Scan 1 more unit to get it FREE under Buy-1-Get-1!'
+        ? 'Add 1 more to get it free'
         : null,
     };
   }
@@ -480,7 +480,7 @@ export function calculateOfflinePromoDiscount(
       const promoDiscount = Math.round(item.storePrice * quantity * 0.1);
       return {
         promoDiscount,
-        promoAppliedText: `2+ Combo 10% Off (-₹${promoDiscount})`,
+        promoAppliedText: `10% deal applied (-₹${promoDiscount})`,
         upsellHint: null,
       };
     }
@@ -488,7 +488,7 @@ export function calculateOfflinePromoDiscount(
       promoDiscount: 0,
       promoAppliedText: null,
       upsellHint:
-        quantity === 1 ? 'Add 1 more to unlock extra 10% Mart Combo discount!' : null,
+        quantity === 1 ? 'Add 1 more to save 10%' : null,
     };
   }
   if (offer === 'BUY_3_GET_15_OFF') {
@@ -496,7 +496,7 @@ export function calculateOfflinePromoDiscount(
       const promoDiscount = Math.round(item.storePrice * quantity * 0.15);
       return {
         promoDiscount,
-        promoAppliedText: `3+ Bulk 15% Off (-₹${promoDiscount})`,
+        promoAppliedText: `15% deal applied (-₹${promoDiscount})`,
         upsellHint: null,
       };
     }
@@ -504,7 +504,7 @@ export function calculateOfflinePromoDiscount(
       promoDiscount: 0,
       promoAppliedText: null,
       upsellHint:
-        quantity > 0 ? `Add ${3 - quantity} more for 15% Bulk Mart discount!` : null,
+        quantity > 0 ? `Add ${3 - quantity} more to save 15%` : null,
     };
   }
   return { promoDiscount: 0, promoAppliedText: null, upsellHint: null };

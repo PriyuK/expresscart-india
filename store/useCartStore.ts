@@ -10,9 +10,14 @@ import {
 } from '../data/mockStoreCatalog';
 import { callBackendApi } from '../utils/apiClient';
 
+export type UserRole = 'SHOPPER' | 'STORE_STAFF';
+
 export interface UserProfile {
   name: string;
   phone: string;
+  role?: UserRole;
+  employeeId?: string;
+  assignedStore?: string;
   isVerified: boolean;
   aadhaarLast4?: string;
   trustScore: number;
@@ -96,15 +101,45 @@ export interface ExitPassPayload {
   allPaidItems?: CartItem[];
   securityFlags?: SecurityFlag[];
   actualPhysicalItemsInCart?: string[];
+  exitVerified?: boolean;
+  verifiedByStaffId?: string;
+  verifiedAt?: string;
+  requiresCounterCheckout?: boolean;
+  verificationMode?: 'QR_GATE_SCAN' | 'PHYSICAL_COUNTER_BILL' | 'COUNTER_HANDOFF';
+  counterStatus?: 'NONE' | 'SENT_TO_COUNTER' | 'CLEARED_PHYSICAL_BILL';
+  physicalBillRef?: string;
+  counterResolutionType?:
+    | 'COUNTER_HANDOFF_PAID'
+    | 'COUNTER_ADDON_PAID'
+    | 'COUNTER_FULL_REBILL_REFUND';
 }
 
+export const COUNTER_CHECKOUT_TRUST_THRESHOLD = 40;
+const VALID_STORE_PASSCODES = ['1234', '2468', '9999'];
+
 interface CartState {
+  // Theme State
+  isDarkMode: boolean;
+  toggleDarkMode: () => void;
+
+  // Legal Consent State (DPDP Act 2023 & Store Exit Verification Terms)
+  legalAccepted: boolean;
+  legalAcceptedAt?: string;
+  setLegalAccepted: (accepted: boolean) => void;
+
   // Backend Connectivity State
   backendConnected: boolean;
 
-  // User Auth & Wallet State
+  // User Auth & Role State
   userProfile: UserProfile | null;
   loginWithOtp: (name: string, phone: string, aadhaarLast4?: string) => void;
+  loginAsStaff: (params: {
+    name: string;
+    phone: string;
+    employeeId: string;
+    storePasscode: string;
+    assignedStore?: string;
+  }) => Promise<{ ok: boolean; error?: string }>;
   logoutUser: () => void;
   linkAadhaarKyc: (last4: string) => void;
   topUpWallet: (amount: number) => void;
@@ -121,6 +156,9 @@ interface CartState {
   setActiveStore: (storeName: string, gpsAuto?: boolean) => void;
   setCheckedIn: (checkedIn: boolean) => void;
   syncStoreCatalogApi: (coords?: { lat: number; lng: number }) => void;
+  upsertCatalogProduct: (
+    product: Partial<CatalogItem> & { barcode: string }
+  ) => Promise<CatalogItem>;
   toggleOfflineDeadZone: () => void;
 
   // Cart & Family Multi-Cart State
@@ -157,12 +195,47 @@ interface CartState {
   removeItem: (barcode: string, targetSlot?: 1 | 2) => void;
   clearCart: () => void;
 
-  // Exit Pass & Audit
+  // Exit Pass, Order History & Staff Verification
   lastExitPass: ExitPassPayload | null;
   orderHistory: ExitPassPayload[];
+  fetchOrderHistory: () => Promise<void>;
+  markOrderExitVerified: (orderId: string, staffId?: string) => Promise<void>;
+  sendOrderToCounter: (orderId: string, staffId?: string) => Promise<void>;
+  verifyOrderWithPhysicalBill: (params: {
+    orderId: string;
+    physicalBillRef?: string;
+    resolutionType?:
+      | 'COUNTER_HANDOFF_PAID'
+      | 'COUNTER_ADDON_PAID'
+      | 'COUNTER_FULL_REBILL_REFUND';
+    staffId?: string;
+  }) => Promise<void>;
   getAuditItems: () => CartItem[];
   getCombinedCartItems: () => CartItem[];
-  generateExitPass: (paymentMethod?: string) => ExitPassPayload;
+  generateExitPass: (
+    paymentMethod?: string,
+    options?: { requiresCounterCheckout?: boolean }
+  ) => ExitPassPayload;
+}
+
+export function computeInternalCheckoutTrustDelta(
+  securityFlags: SecurityFlag[],
+  swappedUnpaidCount: number
+): number {
+  if (securityFlags.length === 0 && swappedUnpaidCount === 0) {
+    return 2;
+  }
+
+  let delta = 0;
+  securityFlags.forEach((flag) => {
+    if (flag.type === 'BARCODE_SWAP_SUSPECTED') {
+      delta -= 15;
+    } else if (flag.type === 'UNSCANNED_DROP_DETECTED') {
+      delta -= flag.resolved ? 2 : 10;
+    }
+  });
+  delta -= swappedUnpaidCount * 10;
+  return delta;
 }
 
 function buildCartItemFromCatalog(
@@ -198,6 +271,15 @@ function buildCartItemFromCatalog(
 export const useCartStore = create<CartState>()(
   persist(
     (set, get) => ({
+      isDarkMode: false,
+      toggleDarkMode: () => set((state) => ({ isDarkMode: !state.isDarkMode })),
+      legalAccepted: true,
+      legalAcceptedAt: undefined,
+      setLegalAccepted: (accepted: boolean) =>
+        set({
+          legalAccepted: accepted,
+          legalAcceptedAt: accepted ? new Date().toISOString() : undefined,
+        }),
       backendConnected: true,
       userProfile: null,
 
@@ -206,6 +288,7 @@ export const useCartStore = create<CartState>()(
         const optimisticProfile: UserProfile = {
           name: name.trim() || 'Express Shopper',
           phone: cleanPhone,
+          role: 'SHOPPER',
           isVerified: true,
           aadhaarLast4: aadhaarLast4
             ? aadhaarLast4.replace(/\D/g, '').slice(-4)
@@ -216,22 +299,85 @@ export const useCartStore = create<CartState>()(
         };
         set({ userProfile: optimisticProfile });
 
-        // Sync with Backend Auth API
         callBackendApi('/api/auth', {
           method: 'POST',
           body: {
             action: 'verify-otp',
             name: optimisticProfile.name,
             phone: cleanPhone,
+            role: 'SHOPPER',
             otp: '4821',
             aadhaarLast4: optimisticProfile.aadhaarLast4,
           },
           isOfflineDeadZone: get().isOfflineDeadZone,
         }).then((res) => {
           if (res?.ok && res.userProfile) {
-            set({ userProfile: res.userProfile, backendConnected: true });
+            set({
+              userProfile: { ...res.userProfile, role: 'SHOPPER' },
+              backendConnected: true,
+            });
           }
         });
+      },
+
+      loginAsStaff: async ({
+        name,
+        phone,
+        employeeId,
+        storePasscode,
+        assignedStore,
+      }) => {
+        const cleanPhone = phone.replace(/\D/g, '').slice(-10);
+        const cleanEmp = employeeId.trim().toUpperCase();
+        const cleanPass = storePasscode.trim();
+
+        if (!cleanEmp) {
+          return { ok: false, error: 'Employee ID is required' };
+        }
+        if (!VALID_STORE_PASSCODES.includes(cleanPass)) {
+          return {
+            ok: false,
+            error: 'Invalid Store Authorization Passcode',
+          };
+        }
+
+        const staffProfile: UserProfile = {
+          name: name.trim() || 'Store Security Associate',
+          phone: cleanPhone,
+          role: 'STORE_STAFF',
+          employeeId: cleanEmp,
+          assignedStore: assignedStore || get().activeStore,
+          isVerified: true,
+          trustScore: 100,
+          walletBalance: 0,
+          verifiedAt: new Date().toISOString(),
+        };
+
+        set({ userProfile: staffProfile });
+
+        const res = await callBackendApi('/api/auth', {
+          method: 'POST',
+          body: {
+            action: 'verify-otp',
+            name: staffProfile.name,
+            phone: cleanPhone,
+            role: 'STORE_STAFF',
+            employeeId: cleanEmp,
+            storePasscode: cleanPass,
+            assignedStore: staffProfile.assignedStore,
+            otp: '4821',
+          },
+          isOfflineDeadZone: get().isOfflineDeadZone,
+        });
+
+        if (res?.ok && res.userProfile) {
+          set({
+            userProfile: { ...res.userProfile, role: 'STORE_STAFF' },
+            backendConnected: true,
+          });
+        }
+
+        return { ok: true };
       },
 
       logoutUser: () => {
@@ -310,7 +456,7 @@ export const useCartStore = create<CartState>()(
         set({
           userProfile: {
             ...current,
-            trustScore: Math.max(40, Math.min(100, current.trustScore + delta)),
+            trustScore: Math.max(0, Math.min(100, current.trustScore + delta)),
           },
         });
         callBackendApi('/api/auth', {
@@ -356,13 +502,14 @@ export const useCartStore = create<CartState>()(
 
       syncStoreCatalogApi: (coords?: { lat: number; lng: number }) => {
         set({
-          catalogCache: STORE_CATALOG,
           isCheckedIn: true,
           lastCatalogSyncTime: new Date().toLocaleTimeString(),
         });
         callBackendApi('/api/catalog', {
           method: 'GET',
-          query: coords ? { lat: coords.lat, lng: coords.lng } : { store: get().activeStore },
+          query: coords
+            ? { lat: coords.lat, lng: coords.lng }
+            : { store: get().activeStore },
           isOfflineDeadZone: get().isOfflineDeadZone,
         }).then((res) => {
           if (res?.ok && Array.isArray(res.catalog)) {
@@ -377,6 +524,91 @@ export const useCartStore = create<CartState>()(
         });
       },
 
+      upsertCatalogProduct: async (productInput) => {
+        const state = get();
+        const existing =
+          state.catalogCache.find((p) => p.barcode === productInput.barcode) ||
+          CATALOG_BY_BARCODE[productInput.barcode];
+
+        const offerType: OfferType =
+          (productInput.offerType as OfferType) || existing?.offerType || 'NONE';
+        const offerTagMap: Record<OfferType, string | undefined> = {
+          NONE: undefined,
+          BOGO: 'Buy 1 Get 1 Free',
+          BUY_2_EXTRA_10_OFF: 'Buy 2+ get extra 10% off',
+          BUY_3_GET_15_OFF: 'Buy 3+ get ₹15 off',
+        };
+
+        const mrp = Math.max(1, Number(productInput.mrp ?? existing?.mrp ?? 100));
+        const storePrice = Math.min(
+          mrp,
+          Math.max(1, Number(productInput.storePrice ?? existing?.storePrice ?? mrp))
+        );
+        const weightGrams = Math.max(
+          1,
+          Number(productInput.weightGrams ?? existing?.weightGrams ?? 250)
+        );
+
+        const newItem: CatalogItem = {
+          barcode: productInput.barcode.trim(),
+          name: (productInput.name || existing?.name || 'New Store Item').trim(),
+          brand: (productInput.brand || existing?.brand || 'Store Brand').trim(),
+          unit: (productInput.unit || existing?.unit || `${weightGrams} g`).trim(),
+          category:
+            productInput.category || existing?.category || 'Staples & Grains',
+          mrp,
+          storePrice,
+          weightGrams,
+          emoji:
+            existing?.emoji ||
+            (productInput.brand || productInput.name || 'SK')
+              .replace(/[^a-zA-Z0-9]/g, '')
+              .slice(0, 2)
+              .toUpperCase(),
+          bgColor: existing?.bgColor || '#F4F4F5',
+          accentColor: existing?.accentColor || '#18181B',
+          aisle: productInput.aisle || existing?.aisle || 'Aisle 01',
+          gstPercent: Number(productInput.gstPercent ?? existing?.gstPercent ?? 12),
+          offerType,
+          offerTag: offerTagMap[offerType],
+          packageColorHex:
+            productInput.packageColorHex || existing?.packageColorHex || '#10B981',
+          packageColorName:
+            productInput.packageColorName ||
+            existing?.packageColorName ||
+            'Standard Pack',
+          isQuickTest: existing?.isQuickTest ?? false,
+          isHighValueAudit: storePrice >= 300,
+        };
+
+        const currentCatalog = state.catalogCache || STORE_CATALOG;
+        const idx = currentCatalog.findIndex((i) => i.barcode === newItem.barcode);
+        const updatedCatalog =
+          idx > -1
+            ? currentCatalog.map((i, k) => (k === idx ? newItem : i))
+            : [newItem, ...currentCatalog];
+
+        set({
+          catalogCache: updatedCatalog,
+          lastCatalogSyncTime: new Date().toLocaleTimeString(),
+        });
+
+        const res = await callBackendApi('/api/catalog', {
+          method: 'POST',
+          body: {
+            action: 'upsert-product',
+            product: newItem,
+          },
+          isOfflineDeadZone: state.isOfflineDeadZone,
+        });
+
+        if (res?.ok && Array.isArray(res.catalog)) {
+          set({ catalogCache: res.catalog, backendConnected: true });
+        }
+
+        return newItem;
+      },
+
       toggleOfflineDeadZone: () =>
         set((state) => ({ isOfflineDeadZone: !state.isOfflineDeadZone })),
 
@@ -389,7 +621,7 @@ export const useCartStore = create<CartState>()(
 
       setActiveCartSlot: (slot: 1 | 2) => set({ activeCartSlot: slot }),
 
-      startFamilySession: (memberName = 'Priya (Cart #2)'): FamilySession => {
+      startFamilySession: (memberName = 'Family Cart #2'): FamilySession => {
         const state = get();
         const profile = state.userProfile;
         const pinCode = String(Math.floor(1000 + Math.random() * 9000));
@@ -508,13 +740,13 @@ export const useCartStore = create<CartState>()(
       simulateFamilyMemberScan: (barcode?: string): CartItem | null => {
         const state = get();
         if (!state.familySession) {
-          state.startFamilySession('Priya (Cart #2)');
+          state.startFamilySession('Family Cart #2');
         }
         const sampleBarcodes = [
-          '8901052014019', // Tata Tea Gold
-          '8901088062152', // Saffola Oil
-          '8904004400236', // Haldiram's Bhujia
-          '8901063014329', // Good Day
+          '8901052014019',
+          '8901088062152',
+          '8904004400236',
+          '8901063014329',
         ];
         const chosenBarcode =
           barcode || sampleBarcodes[Math.floor(Math.random() * sampleBarcodes.length)];
@@ -556,8 +788,13 @@ export const useCartStore = create<CartState>()(
         scannedBarcode: string,
         droppedBarcode: string
       ): SecurityFlag | null => {
-        const scannedCat = CATALOG_BY_BARCODE[scannedBarcode];
-        const droppedCat = CATALOG_BY_BARCODE[droppedBarcode];
+        const state = get();
+        const scannedCat =
+          state.catalogCache.find((i) => i.barcode === scannedBarcode) ||
+          CATALOG_BY_BARCODE[scannedBarcode];
+        const droppedCat =
+          state.catalogCache.find((i) => i.barcode === droppedBarcode) ||
+          CATALOG_BY_BARCODE[droppedBarcode];
         if (!scannedCat || !droppedCat) return null;
 
         get().addItemByBarcode(scannedBarcode);
@@ -578,10 +815,10 @@ export const useCartStore = create<CartState>()(
           note: `Scanned ${scannedCat.name} (₹${scannedCat.storePrice}, ${scannedCat.weightGrams}g) but camera drop-frame matched ${droppedCat.packageColorName} (${droppedCat.name}, ₹${droppedCat.storePrice}).`,
         };
 
-        set((state) => ({
-          securityFlags: [flag, ...state.securityFlags],
+        set((s) => ({
+          securityFlags: [flag, ...s.securityFlags],
           swappedUnpaidBarcodesInBasket: [
-            ...new Set([...state.swappedUnpaidBarcodesInBasket, droppedCat.barcode]),
+            ...new Set([...s.swappedUnpaidBarcodesInBasket, droppedCat.barcode]),
           ],
         }));
 
@@ -597,12 +834,14 @@ export const useCartStore = create<CartState>()(
 
       addItemByBarcode: (barcode: string, explicitSlot?: 1 | 2): boolean => {
         const cleanCode = barcode.trim();
-        const catalogItem = CATALOG_BY_BARCODE[cleanCode];
+        const state = get();
+        const catalogItem =
+          state.catalogCache.find((i) => i.barcode === cleanCode) ||
+          CATALOG_BY_BARCODE[cleanCode];
         if (!catalogItem) {
           return false;
         }
 
-        const state = get();
         const slot = explicitSlot || state.activeCartSlot || 1;
         const addedBy =
           slot === 2
@@ -658,7 +897,6 @@ export const useCartStore = create<CartState>()(
           });
         }
 
-        // Sync multi-cart room with backend if Family Mode active
         if (get().familySession?.isActive) {
           get().syncFamilyRoomWithBackend();
         }
@@ -671,13 +909,17 @@ export const useCartStore = create<CartState>()(
         if (slot === 1) {
           set((state) => ({
             items: state.items.map((item) =>
-              item.barcode === barcode ? { ...item, quantity: item.quantity + 1 } : item
+              item.barcode === barcode
+                ? { ...item, quantity: item.quantity + 1 }
+                : item
             ),
           }));
         } else {
           set((state) => ({
             familySecondaryItems: state.familySecondaryItems.map((item) =>
-              item.barcode === barcode ? { ...item, quantity: item.quantity + 1 } : item
+              item.barcode === barcode
+                ? { ...item, quantity: item.quantity + 1 }
+                : item
             ),
           }));
         }
@@ -692,7 +934,9 @@ export const useCartStore = create<CartState>()(
           set((state) => ({
             items: state.items
               .map((item) =>
-                item.barcode === barcode ? { ...item, quantity: item.quantity - 1 } : item
+                item.barcode === barcode
+                  ? { ...item, quantity: item.quantity - 1 }
+                  : item
               )
               .filter((item) => item.quantity > 0),
           }));
@@ -700,7 +944,9 @@ export const useCartStore = create<CartState>()(
           set((state) => ({
             familySecondaryItems: state.familySecondaryItems
               .map((item) =>
-                item.barcode === barcode ? { ...item, quantity: item.quantity - 1 } : item
+                item.barcode === barcode
+                  ? { ...item, quantity: item.quantity - 1 }
+                  : item
               )
               .filter((item) => item.quantity > 0),
           }));
@@ -743,6 +989,205 @@ export const useCartStore = create<CartState>()(
       lastExitPass: null,
       orderHistory: [],
 
+      fetchOrderHistory: async () => {
+        const state = get();
+        const phone = state.userProfile?.phone;
+        const res = await callBackendApi('/api/orders', {
+          method: 'GET',
+          query:
+            state.userProfile?.role === 'STORE_STAFF'
+              ? {}
+              : phone
+              ? { phone }
+              : {},
+          isOfflineDeadZone: state.isOfflineDeadZone,
+        });
+        if (res?.ok && Array.isArray(res.orders)) {
+          set({
+            orderHistory: res.orders,
+            backendConnected: true,
+          });
+        }
+      },
+
+      markOrderExitVerified: async (orderId: string, staffId = 'EMP-101') => {
+        const nowIso = new Date().toISOString();
+        set((state) => ({
+          lastExitPass:
+            state.lastExitPass?.orderId === orderId
+              ? {
+                  ...state.lastExitPass,
+                  exitVerified: true,
+                  verificationMode:
+                    state.lastExitPass.verificationMode === 'PHYSICAL_COUNTER_BILL'
+                      ? 'PHYSICAL_COUNTER_BILL'
+                      : 'QR_GATE_SCAN',
+                  verifiedByStaffId: staffId,
+                  verifiedAt: nowIso,
+                }
+              : state.lastExitPass,
+          orderHistory: (state.orderHistory || []).map((o) =>
+            o.orderId === orderId
+              ? {
+                  ...o,
+                  exitVerified: true,
+                  verificationMode:
+                    o.verificationMode === 'PHYSICAL_COUNTER_BILL'
+                      ? 'PHYSICAL_COUNTER_BILL'
+                      : 'QR_GATE_SCAN',
+                  verifiedByStaffId: staffId,
+                  verifiedAt: nowIso,
+                }
+              : o
+          ),
+        }));
+
+        await callBackendApi('/api/orders', {
+          method: 'POST',
+          body: {
+            action: 'approve-exit',
+            orderId,
+            staffId,
+          },
+          isOfflineDeadZone: get().isOfflineDeadZone,
+        });
+      },
+
+      sendOrderToCounter: async (orderId: string, staffId = 'EMP-101') => {
+        set((state) => ({
+          lastExitPass:
+            state.lastExitPass?.orderId === orderId
+              ? {
+                  ...state.lastExitPass,
+                  requiresCounterCheckout: true,
+                  verificationMode: 'COUNTER_HANDOFF',
+                  counterStatus: 'SENT_TO_COUNTER',
+                }
+              : state.lastExitPass,
+          orderHistory: (state.orderHistory || []).map((o) =>
+            o.orderId === orderId
+              ? {
+                  ...o,
+                  requiresCounterCheckout: true,
+                  verificationMode: 'COUNTER_HANDOFF',
+                  counterStatus: 'SENT_TO_COUNTER',
+                }
+              : o
+          ),
+        }));
+
+        const res = await callBackendApi('/api/orders', {
+          method: 'POST',
+          body: {
+            action: 'send-to-counter',
+            orderId,
+            staffId,
+          },
+          isOfflineDeadZone: get().isOfflineDeadZone,
+        });
+        if (res?.ok && res.exitPass) {
+          set((state) => ({
+            lastExitPass:
+              state.lastExitPass?.orderId === orderId
+                ? res.exitPass
+                : state.lastExitPass,
+            orderHistory: (state.orderHistory || []).map((o) =>
+              o.orderId === orderId ? res.exitPass : o
+            ),
+            backendConnected: true,
+          }));
+        }
+      },
+
+      verifyOrderWithPhysicalBill: async ({
+        orderId,
+        physicalBillRef,
+        resolutionType = 'COUNTER_HANDOFF_PAID',
+        staffId = 'EMP-101',
+      }) => {
+        const cleanBillRef =
+          physicalBillRef?.trim() || `POS-${Date.now().toString().slice(-4)}`;
+        const nowIso = new Date().toISOString();
+
+        const currentState = get();
+        const existingOrder =
+          currentState.lastExitPass?.orderId === orderId
+            ? currentState.lastExitPass
+            : currentState.orderHistory.find((o) => o.orderId === orderId);
+
+        const shouldRefundWallet =
+          resolutionType === 'COUNTER_FULL_REBILL_REFUND' &&
+          existingOrder &&
+          !existingOrder.requiresCounterCheckout &&
+          existingOrder.paymentMethod !== 'Pay at Counter' &&
+          existingOrder.counterStatus !== 'CLEARED_PHYSICAL_BILL' &&
+          currentState.userProfile &&
+          existingOrder.customerPhone === currentState.userProfile.phone;
+
+        set((state) => ({
+          userProfile: shouldRefundWallet && state.userProfile
+            ? {
+                ...state.userProfile,
+                walletBalance:
+                  state.userProfile.walletBalance + (existingOrder?.totalPrice || 0),
+              }
+            : state.userProfile,
+          lastExitPass:
+            state.lastExitPass?.orderId === orderId
+              ? {
+                  ...state.lastExitPass,
+                  exitVerified: true,
+                  requiresCounterCheckout: true,
+                  verificationMode: 'PHYSICAL_COUNTER_BILL',
+                  counterStatus: 'CLEARED_PHYSICAL_BILL',
+                  physicalBillRef: cleanBillRef,
+                  counterResolutionType: resolutionType,
+                  verifiedByStaffId: staffId,
+                  verifiedAt: nowIso,
+                }
+              : state.lastExitPass,
+          orderHistory: (state.orderHistory || []).map((o) =>
+            o.orderId === orderId
+              ? {
+                  ...o,
+                  exitVerified: true,
+                  requiresCounterCheckout: true,
+                  verificationMode: 'PHYSICAL_COUNTER_BILL',
+                  counterStatus: 'CLEARED_PHYSICAL_BILL',
+                  physicalBillRef: cleanBillRef,
+                  counterResolutionType: resolutionType,
+                  verifiedByStaffId: staffId,
+                  verifiedAt: nowIso,
+                }
+              : o
+          ),
+        }));
+
+        const res = await callBackendApi('/api/orders', {
+          method: 'POST',
+          body: {
+            action: 'verify-physical-bill',
+            orderId,
+            physicalBillRef: cleanBillRef,
+            resolutionType,
+            staffId,
+          },
+          isOfflineDeadZone: get().isOfflineDeadZone,
+        });
+        if (res?.ok && res.exitPass) {
+          set((state) => ({
+            lastExitPass:
+              state.lastExitPass?.orderId === orderId
+                ? res.exitPass
+                : state.lastExitPass,
+            orderHistory: (state.orderHistory || []).map((o) =>
+              o.orderId === orderId ? res.exitPass : o
+            ),
+            backendConnected: true,
+          }));
+        }
+      },
+
       getCombinedCartItems: (): CartItem[] => {
         const state = get();
         const combinedMap: Record<string, CartItem> = {};
@@ -760,8 +1205,18 @@ export const useCartStore = create<CartState>()(
       },
 
       getAuditItems: (): CartItem[] => {
-        const currentItems = get().getCombinedCartItems();
+        const state = get();
+        const currentItems = state.getCombinedCartItems();
         if (currentItems.length === 0) return [];
+
+        const trustScore = state.userProfile?.trustScore ?? 95;
+        const hasUnresolvedFlag = state.securityFlags.some((f) => !f.resolved);
+        let auditLimit = 3;
+        if (hasUnresolvedFlag || trustScore < 70) {
+          auditLimit = 5;
+        } else if (trustScore >= 90 && state.securityFlags.length === 0) {
+          auditLimit = 2;
+        }
 
         const sortedByPrice = [...currentItems].sort((a, b) => {
           if (b.storePrice !== a.storePrice) {
@@ -770,19 +1225,22 @@ export const useCartStore = create<CartState>()(
           return b.storePrice * b.quantity - a.storePrice * a.quantity;
         });
 
-        if (sortedByPrice.length <= 3) {
+        if (sortedByPrice.length <= auditLimit) {
           return sortedByPrice;
         }
 
-        const topTwo = sortedByPrice.slice(0, 2);
-        const remaining = sortedByPrice.slice(2);
+        const topFixed = sortedByPrice.slice(0, auditLimit - 1);
+        const remaining = sortedByPrice.slice(auditLimit - 1);
         const randomIndex = Math.floor(Math.random() * remaining.length);
-        const randomThird = remaining[randomIndex];
+        const randomPick = remaining[randomIndex];
 
-        return [...topTwo, randomThird];
+        return [...topFixed, randomPick];
       },
 
-      generateExitPass: (paymentMethod = 'UPI Instant'): ExitPassPayload => {
+      generateExitPass: (
+        paymentMethod = 'UPI Instant',
+        options?: { requiresCounterCheckout?: boolean }
+      ): ExitPassPayload => {
         const state = get();
         const combinedItems = state.getCombinedCartItems();
 
@@ -805,9 +1263,14 @@ export const useCartStore = create<CartState>()(
           (sum, i) => sum + i.storePrice * i.quantity,
           0
         );
-        const totalMrp = combinedItems.reduce((sum, i) => sum + i.mrp * i.quantity, 0);
+        const totalMrp = combinedItems.reduce(
+          (sum, i) => sum + i.mrp * i.quantity,
+          0
+        );
         const promoSavings = combinedItems.reduce((sum, i) => {
-          const cat = CATALOG_BY_BARCODE[i.barcode];
+          const cat =
+            state.catalogCache.find((c) => c.barcode === i.barcode) ||
+            CATALOG_BY_BARCODE[i.barcode];
           const { promoDiscount } = calculateOfflinePromoDiscount(
             { storePrice: i.storePrice, offerType: i.offerType || cat?.offerType },
             i.quantity
@@ -818,11 +1281,37 @@ export const useCartStore = create<CartState>()(
         const totalPrice = Math.max(0, rawStoreTotal - promoSavings);
         const totalSavings = totalMrp - totalPrice;
         const cartWeightGrams = cart1WeightGrams + cart2WeightGrams;
-        const auditItems = state.getAuditItems();
+
+        const trustDelta = computeInternalCheckoutTrustDelta(
+          state.securityFlags,
+          state.swappedUnpaidBarcodesInBasket.length
+        );
+        const updatedTrustScore = Math.max(
+          0,
+          Math.min(100, (state.userProfile?.trustScore ?? 95) + trustDelta)
+        );
+        if (state.userProfile) {
+          set({
+            userProfile: {
+              ...state.userProfile,
+              trustScore: updatedTrustScore,
+            },
+          });
+        }
+
+        const forceCounter = Boolean(
+          options?.requiresCounterCheckout ||
+            updatedTrustScore < COUNTER_CHECKOUT_TRUST_THRESHOLD
+        );
+        const resolvedPaymentMethod = forceCounter
+          ? 'Pay at Counter'
+          : paymentMethod;
+
+        const auditItems = get().getAuditItems();
 
         const randomSuffix = Math.floor(100000 + Math.random() * 900000);
         const orderId = `EXP-IN-${randomSuffix}`;
-        const upiRef = `${paymentMethod
+        const upiRef = `${resolvedPaymentMethod
           .replace(/\s+/g, '')
           .toUpperCase()}-${Date.now().toString().slice(-6)}`;
         const timestamp = new Date().toISOString();
@@ -840,10 +1329,10 @@ export const useCartStore = create<CartState>()(
           storeName: state.activeStore,
           timestamp,
           upiRef,
-          paymentMethod,
+          paymentMethod: resolvedPaymentMethod,
           customerName: state.userProfile?.name || 'Verified Shopper',
           customerPhone: state.userProfile?.phone || '9820411290',
-          customerTrustScore: state.userProfile?.trustScore ?? 95,
+          customerTrustScore: updatedTrustScore,
           signature,
           totalPrice,
           totalMrp,
@@ -861,20 +1350,24 @@ export const useCartStore = create<CartState>()(
           allPaidItems: combinedItems,
           securityFlags: state.securityFlags,
           actualPhysicalItemsInCart,
+          exitVerified: false,
+          requiresCounterCheckout: forceCounter,
+          verificationMode: forceCounter ? 'COUNTER_HANDOFF' : 'QR_GATE_SCAN',
+          counterStatus: forceCounter ? 'SENT_TO_COUNTER' : 'NONE',
         };
 
         set((prev) => ({
           lastExitPass: payload,
-          orderHistory: [payload, ...(prev.orderHistory || []).slice(0, 9)],
+          orderHistory: [payload, ...(prev.orderHistory || []).slice(0, 19)],
         }));
 
-        // Persist & sign with Backend HMAC-SHA256 Orders API
         callBackendApi('/api/orders', {
           method: 'POST',
           body: {
             action: 'checkout',
             storeName: state.activeStore,
-            paymentMethod,
+            paymentMethod: resolvedPaymentMethod,
+            requiresCounterCheckout: forceCounter,
             customerName: payload.customerName,
             customerPhone: payload.customerPhone,
             cart1Items: state.items,
@@ -891,8 +1384,18 @@ export const useCartStore = create<CartState>()(
               lastExitPass: res.exitPass,
               orderHistory: [
                 res.exitPass,
-                ...(prev.orderHistory || []).filter((o) => o.orderId !== payload.orderId),
-              ].slice(0, 10),
+                ...(prev.orderHistory || []).filter(
+                  (o) => o.orderId !== payload.orderId
+                ),
+              ].slice(0, 20),
+              userProfile: prev.userProfile
+                ? {
+                    ...prev.userProfile,
+                    trustScore:
+                      res.exitPass.customerTrustScore ??
+                      prev.userProfile.trustScore,
+                  }
+                : prev.userProfile,
               backendConnected: true,
             }));
           }

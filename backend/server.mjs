@@ -9,6 +9,7 @@ const PORT = process.env.PORT || 4000;
 const HMAC_SECRET =
   process.env.EXPRESSCART_HMAC_SECRET || 'expresscart-india-hmac-secret-2026';
 const DB_FILE = path.join(os.tmpdir(), 'expresscart-india-backend-db.json');
+const VALID_STORE_PASSCODES = ['1234', '2468', '9999'];
 
 const PILOT_STORE_BRANCHES = [
   {
@@ -49,6 +50,44 @@ const PILOT_STORE_BRANCHES = [
   },
 ];
 
+function computeCheckoutTrustDelta(securityFlags = [], swappedUnpaidCount = 0) {
+  if (securityFlags.length === 0 && swappedUnpaidCount === 0) {
+    return 2;
+  }
+  let delta = 0;
+  for (const flag of securityFlags) {
+    if (flag.type === 'BARCODE_SWAP_SUSPECTED') {
+      delta -= 15;
+    } else if (flag.type === 'UNSCANNED_DROP_DETECTED') {
+      delta -= flag.resolved ? 2 : 10;
+    }
+  }
+  delta -= swappedUnpaidCount * 10;
+  return delta;
+}
+
+function pickDynamicAuditItems(combinedItems, trustScore, securityFlags = []) {
+  if (!Array.isArray(combinedItems) || combinedItems.length === 0) return [];
+  const hasUnresolvedFlag = securityFlags.some((f) => !f.resolved);
+  let auditLimit = 3;
+  if (hasUnresolvedFlag || trustScore < 70) {
+    auditLimit = 5;
+  } else if (trustScore >= 90 && securityFlags.length === 0) {
+    auditLimit = 2;
+  }
+
+  const sortedByPrice = [...combinedItems].sort((a, b) => {
+    if (b.storePrice !== a.storePrice) return b.storePrice - a.storePrice;
+    return b.storePrice * (b.quantity || 1) - a.storePrice * (a.quantity || 1);
+  });
+
+  if (sortedByPrice.length <= auditLimit) return sortedByPrice;
+  const topFixed = sortedByPrice.slice(0, auditLimit - 1);
+  const rest = sortedByPrice.slice(auditLimit - 1);
+  const randomPick = rest[Math.floor(Math.random() * rest.length)];
+  return [...topFixed, randomPick];
+}
+
 function signExitPass({
   orderId,
   storeName,
@@ -70,7 +109,11 @@ function signExitPass({
 function loadDb() {
   try {
     if (fs.existsSync(DB_FILE)) {
-      return JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
+      const parsed = JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
+      if (parsed && parsed.usersByPhone) {
+        if (!parsed.productsByBarcode) parsed.productsByBarcode = {};
+        return parsed;
+      }
     }
   } catch {}
   const initial = {
@@ -78,14 +121,26 @@ function loadDb() {
       '9820411290': {
         name: 'Aarav Sharma',
         phone: '9820411290',
+        role: 'SHOPPER',
         isVerified: true,
         aadhaarLast4: '8492',
         trustScore: 98,
         walletBalance: 1500,
         verifiedAt: new Date().toISOString(),
       },
+      '9820099100': {
+        name: 'Rajesh Deshmukh (Gate Staff)',
+        phone: '9820099100',
+        role: 'STORE_STAFF',
+        employeeId: 'EMP-101',
+        assignedStore: 'Reliance/DMart Express Pilot - Store #01',
+        isVerified: true,
+        trustScore: 100,
+        walletBalance: 0,
+        verifiedAt: new Date().toISOString(),
+      },
     },
-    pendingOtps: {},
+    productsByBarcode: {},
     familyRoomsByPin: {},
     ordersById: {},
     stores: PILOT_STORE_BRANCHES,
@@ -104,7 +159,7 @@ function sendJson(res, status, payload) {
   res.writeHead(status, {
     'Content-Type': 'application/json',
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
   });
   res.end(JSON.stringify(payload));
@@ -142,11 +197,24 @@ const server = http.createServer((req, res) => {
     }
 
     if (pathname === '/api/catalog') {
+      if (req.method === 'POST' || req.method === 'PUT') {
+        if (body.action === 'upsert-product' && body.product?.barcode) {
+          db.productsByBarcode[body.product.barcode] = body.product;
+          saveDb(db);
+          return sendJson(res, 200, {
+            ok: true,
+            product: body.product,
+            customProducts: Object.values(db.productsByBarcode),
+          });
+        }
+        return sendJson(res, 400, { ok: false, error: 'Invalid product payload' });
+      }
       return sendJson(res, 200, {
         ok: true,
         syncedAt: new Date().toISOString(),
         store: PILOT_STORE_BRANCHES[0],
         allStores: PILOT_STORE_BRANCHES,
+        customProducts: Object.values(db.productsByBarcode),
       });
     }
 
@@ -164,13 +232,48 @@ const server = http.createServer((req, res) => {
         .replace(/\D/g, '')
         .slice(-10);
       if (body.action === 'verify-otp') {
+        const requestedRole =
+          body.role === 'STORE_STAFF' ? 'STORE_STAFF' : 'SHOPPER';
+        if (requestedRole === 'STORE_STAFF') {
+          if (!String(body.employeeId || '').trim()) {
+            return sendJson(res, 400, {
+              ok: false,
+              error: 'Employee ID is required for Store Staff login',
+            });
+          }
+          if (!VALID_STORE_PASSCODES.includes(String(body.storePasscode || '').trim())) {
+            return sendJson(res, 401, {
+              ok: false,
+              error: 'Invalid Store Authorization Passcode',
+            });
+          }
+        }
         const existing = db.usersByPhone[cleanPhone];
         const profile = {
-          name: String(body.name || existing?.name || 'Express Shopper').trim(),
+          name: String(
+            body.name ||
+              existing?.name ||
+              (requestedRole === 'STORE_STAFF'
+                ? 'Store Staff Associate'
+                : 'Express Shopper')
+          ).trim(),
           phone: cleanPhone,
+          role: requestedRole,
+          employeeId:
+            requestedRole === 'STORE_STAFF'
+              ? String(body.employeeId || existing?.employeeId || 'EMP-101')
+                  .trim()
+                  .toUpperCase()
+              : undefined,
+          assignedStore:
+            requestedRole === 'STORE_STAFF'
+              ? body.assignedStore ||
+                existing?.assignedStore ||
+                PILOT_STORE_BRANCHES[0].name
+              : undefined,
           isVerified: true,
           aadhaarLast4: body.aadhaarLast4 || existing?.aadhaarLast4,
-          trustScore: existing?.trustScore ?? 98,
+          trustScore: requestedRole === 'STORE_STAFF' ? 100 : existing?.trustScore ?? 98,
           walletBalance: existing?.walletBalance ?? 1500,
           verifiedAt: new Date().toISOString(),
         };
@@ -182,6 +285,28 @@ const server = http.createServer((req, res) => {
         const user = db.usersByPhone[cleanPhone];
         if (user) {
           user.walletBalance += Number(body.amount) || 0;
+          saveDb(db);
+        }
+        return sendJson(res, 200, { ok: true, userProfile: user });
+      }
+      if (body.action === 'link-kyc') {
+        const user = db.usersByPhone[cleanPhone];
+        if (user) {
+          user.aadhaarLast4 = String(body.aadhaarLast4 || '')
+            .replace(/\D/g, '')
+            .slice(-4);
+          user.trustScore = Math.min(100, (user.trustScore ?? 95) + 4);
+          saveDb(db);
+        }
+        return sendJson(res, 200, { ok: true, userProfile: user });
+      }
+      if (body.action === 'adjust-trust') {
+        const user = db.usersByPhone[cleanPhone];
+        if (user) {
+          user.trustScore = Math.max(
+            0,
+            Math.min(100, (user.trustScore ?? 95) + (Number(body.trustDelta) || 0))
+          );
           saveDb(db);
         }
         return sendJson(res, 200, { ok: true, userProfile: user });
@@ -224,15 +349,108 @@ const server = http.createServer((req, res) => {
 
     if (pathname === '/api/orders') {
       if (req.method === 'GET') {
-        return sendJson(res, 200, {
-          ok: true,
-          orders: Object.values(db.ordersById),
-        });
+        const orderId = parsedUrl.searchParams.get('orderId');
+        const phone = parsedUrl.searchParams.get('phone');
+        if (orderId) {
+          const found = db.ordersById[orderId];
+          return found
+            ? sendJson(res, 200, { ok: true, signatureValid: true, exitPass: found })
+            : sendJson(res, 404, { ok: false, error: 'Order not found' });
+        }
+        let orders = Object.values(db.ordersById).reverse();
+        if (phone) {
+          const clean = phone.replace(/\D/g, '').slice(-10);
+          orders = orders.filter((o) => o.customerPhone === clean);
+        }
+        return sendJson(res, 200, { ok: true, orders });
+      }
+      if (body.action === 'approve-exit') {
+        const order = db.ordersById[body.orderId];
+        if (order) {
+          order.exitVerified = true;
+          order.verificationMode =
+            order.verificationMode === 'PHYSICAL_COUNTER_BILL'
+              ? 'PHYSICAL_COUNTER_BILL'
+              : 'QR_GATE_SCAN';
+          order.verifiedByStaffId = body.staffId || 'EMP-101';
+          order.verifiedAt = new Date().toISOString();
+          saveDb(db);
+          return sendJson(res, 200, { ok: true, exitPass: order });
+        }
+        return sendJson(res, 404, { ok: false, error: 'Order not found' });
+      }
+      if (body.action === 'send-to-counter') {
+        const order = db.ordersById[body.orderId];
+        if (order) {
+          order.requiresCounterCheckout = true;
+          order.verificationMode = 'COUNTER_HANDOFF';
+          order.counterStatus = 'SENT_TO_COUNTER';
+          saveDb(db);
+          return sendJson(res, 200, { ok: true, exitPass: order });
+        }
+        return sendJson(res, 404, { ok: false, error: 'Order not found' });
+      }
+      if (body.action === 'verify-physical-bill') {
+        const order = db.ordersById[body.orderId];
+        if (order) {
+          const resolutionType = body.resolutionType || 'COUNTER_HANDOFF_PAID';
+          const shouldRefund =
+            resolutionType === 'COUNTER_FULL_REBILL_REFUND' &&
+            !order.requiresCounterCheckout &&
+            order.paymentMethod !== 'Pay at Counter' &&
+            order.counterStatus !== 'CLEARED_PHYSICAL_BILL';
+          if (shouldRefund && order.customerPhone && db.usersByPhone[order.customerPhone]) {
+            db.usersByPhone[order.customerPhone].walletBalance += order.totalPrice || 0;
+          }
+          order.exitVerified = true;
+          order.requiresCounterCheckout = true;
+          order.verificationMode = 'PHYSICAL_COUNTER_BILL';
+          order.counterStatus = 'CLEARED_PHYSICAL_BILL';
+          order.physicalBillRef =
+            String(body.physicalBillRef || '').trim() ||
+            `POS-${Date.now().toString().slice(-4)}`;
+          order.counterResolutionType = resolutionType;
+          order.verifiedByStaffId = body.staffId || 'EMP-101';
+          order.verifiedAt = new Date().toISOString();
+          saveDb(db);
+          return sendJson(res, 200, { ok: true, exitPass: order });
+        }
+        return sendJson(res, 404, { ok: false, error: 'Order not found' });
       }
       if (body.action === 'checkout') {
         const cart1 = body.cart1Items || [];
         const cart2 = body.cart2Items || [];
         const all = [...cart1, ...cart2];
+        const securityFlags = Array.isArray(body.securityFlags)
+          ? body.securityFlags
+          : [];
+        const swappedUnpaid = Array.isArray(body.swappedUnpaidBarcodesInBasket)
+          ? body.swappedUnpaidBarcodesInBasket
+          : [];
+        const customerPhone = String(body.customerPhone || '9820411290')
+          .replace(/\D/g, '')
+          .slice(-10);
+
+        const existingUser = db.usersByPhone[customerPhone];
+        const baseTrust = existingUser?.trustScore ?? 95;
+        const trustDelta = computeCheckoutTrustDelta(
+          securityFlags,
+          swappedUnpaid.length
+        );
+        const updatedTrustScore = Math.max(
+          0,
+          Math.min(100, baseTrust + trustDelta)
+        );
+        if (existingUser) {
+          existingUser.trustScore = updatedTrustScore;
+        }
+        const forceCounter = Boolean(
+          body.requiresCounterCheckout || updatedTrustScore < 40
+        );
+        const resolvedPaymentMethod = forceCounter
+          ? 'Pay at Counter'
+          : body.paymentMethod || 'ExpressWallet';
+
         const totalItemCount = all.reduce((s, i) => s + (i.quantity || 1), 0);
         const totalPrice = all.reduce(
           (s, i) => s + i.storePrice * (i.quantity || 1),
@@ -250,18 +468,23 @@ const server = http.createServer((req, res) => {
           totalPrice,
           totalItemCount,
           cartWeightGrams,
-          customerPhone: body.customerPhone || '9820411290',
+          customerPhone,
         });
+        const auditItems = pickDynamicAuditItems(
+          all,
+          updatedTrustScore,
+          securityFlags
+        );
         const exitPass = {
           type: 'EXPRESSCART_EXIT_PASS',
           orderId,
           storeName: body.storeName || 'Reliance/DMart Express Pilot - Store #01',
           timestamp: new Date().toISOString(),
           upiRef: `SRV-${Date.now().toString().slice(-6)}`,
-          paymentMethod: body.paymentMethod || 'ExpressWallet',
-          customerName: body.customerName || 'Verified Shopper',
-          customerPhone: body.customerPhone || '9820411290',
-          customerTrustScore: 98,
+          paymentMethod: resolvedPaymentMethod,
+          customerName: existingUser?.name || body.customerName || 'Verified Shopper',
+          customerPhone,
+          customerTrustScore: updatedTrustScore,
           signature,
           totalPrice,
           totalMrp,
@@ -279,9 +502,17 @@ const server = http.createServer((req, res) => {
             (s, i) => s + i.weightGrams * (i.quantity || 1),
             0
           ),
-          auditItems: all.slice(0, 3),
+          auditItems,
           allPaidItems: all,
-          securityFlags: body.securityFlags || [],
+          securityFlags,
+          actualPhysicalItemsInCart: [
+            ...all.map((i) => i.barcode),
+            ...swappedUnpaid,
+          ],
+          exitVerified: false,
+          requiresCounterCheckout: forceCounter,
+          verificationMode: forceCounter ? 'COUNTER_HANDOFF' : 'QR_GATE_SCAN',
+          counterStatus: forceCounter ? 'SENT_TO_COUNTER' : 'NONE',
         };
         db.ordersById[orderId] = exitPass;
         saveDb(db);
@@ -297,4 +528,3 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, () => {
   console.log(`ExpressCart India Backend API running on http://localhost:${PORT}`);
 });
-

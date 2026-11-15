@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   StyleSheet,
   Text,
@@ -8,73 +8,114 @@ import {
   ScrollView,
   SafeAreaView,
 } from 'react-native';
-import { useRouter } from 'expo-router';
-import {
-  Phone,
-  ShieldCheck,
-  Lock,
-  CheckCircle2,
-  Wallet,
-  UserCheck,
-  ArrowRight,
-  Sparkles,
-  LogOut,
-  Plus,
-} from 'lucide-react-native';
+import { useRouter, useLocalSearchParams } from 'expo-router';
+import { Plus, ChevronRight, LogOut, Check } from 'lucide-react-native';
 import { useCartStore } from '../store/useCartStore';
-
-const PILOT_OTP = '4821';
+import {
+  ThemeColors,
+  getThemeColors,
+  FONTS,
+  TYPOGRAPHY,
+  SPACING,
+  RADIUS,
+  ICON,
+  TOUCH_TARGET,
+} from '../theme/tokens';
 
 export default function AuthScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams<{ mode?: string }>();
   const {
+    isDarkMode,
+    legalAccepted,
+    setLegalAccepted,
     userProfile,
+    activeStore,
     loginWithOtp,
+    loginAsStaff,
     logoutUser,
-    linkAadhaarKyc,
     topUpWallet,
   } = useCartStore();
 
+  const COLORS = getThemeColors(isDarkMode);
+  const styles = useMemo(() => createStyles(COLORS), [COLORS]);
+
+  const [authTab, setAuthTab] = useState<'shopper' | 'staff'>(
+    params.mode === 'staff' ? 'staff' : 'shopper'
+  );
   const [name, setName] = useState(userProfile?.name || '');
   const [phone, setPhone] = useState(userProfile?.phone || '');
-  const [aadhaarLast4, setAadhaarLast4] = useState(userProfile?.aadhaarLast4 || '');
+  const [employeeId, setEmployeeId] = useState(
+    userProfile?.employeeId || ''
+  );
+  const [storePasscode, setStorePasscode] = useState('');
   const [otpSent, setOtpSent] = useState(false);
   const [otpInput, setOtpInput] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [kycInput, setKycInput] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleRequestOtp = () => {
     const cleanPhone = phone.replace(/\D/g, '');
     if (!name.trim()) {
-      setErrorMsg('Please enter your full name for GST billing & exit verification.');
+      setErrorMsg('Please enter your name.');
       return;
     }
     if (cleanPhone.length !== 10) {
-      setErrorMsg('Please enter a valid 10-digit Indian mobile number.');
+      setErrorMsg('Please enter a 10-digit mobile number.');
+      return;
+    }
+    if (authTab === 'staff') {
+      if (!employeeId.trim()) {
+        setErrorMsg('Please enter your employee ID (e.g. EMP-101).');
+        return;
+      }
+      if (!storePasscode.trim()) {
+        setErrorMsg('Please enter the 4-digit store passcode.');
+        return;
+      }
+    }
+    if (!legalAccepted) {
+      setErrorMsg(
+        'Please accept the Terms & Conditions and Privacy Policy to continue.'
+      );
       return;
     }
     setErrorMsg(null);
     setOtpSent(true);
   };
 
-  const handleVerifyOtp = (overrideOtp?: string) => {
-    const code = (overrideOtp ?? otpInput).trim();
+  const handleVerifyOtp = async () => {
+    const code = otpInput.trim();
     if (code.length !== 4) {
-      setErrorMsg('Please enter the 4-digit OTP sent to your mobile number.');
+      setErrorMsg('Please enter the 4-digit code.');
       return;
     }
     setErrorMsg(null);
-    loginWithOtp(name, phone, aadhaarLast4 || undefined);
+
+    if (authTab === 'staff') {
+      setIsSubmitting(true);
+      const res = await loginAsStaff({
+        name,
+        phone,
+        employeeId,
+        storePasscode,
+        assignedStore: activeStore,
+      });
+      setIsSubmitting(false);
+      if (!res.ok) {
+        setErrorMsg(res.error || 'Staff sign in failed.');
+        return;
+      }
+      router.replace('/guard');
+      return;
+    }
+
+    loginWithOtp(name, phone);
     router.replace('/shop');
   };
 
-  const handleQuickPilotLogin = () => {
-    setName('Aarav Sharma');
-    setPhone('9820411290');
-    setAadhaarLast4('8492');
-    loginWithOtp('Aarav Sharma', '9820411290', '8492');
-    router.replace('/shop');
-  };
+  const userInitial =
+    userProfile?.name ? userProfile.name.trim().charAt(0).toUpperCase() : 'U';
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -83,259 +124,327 @@ export default function AuthScreen() {
         showsVerticalScrollIndicator={false}
       >
         {userProfile?.isVerified ? (
-          /* LOGGED-IN VERIFIED SHOPPER PROFILE & WALLET VIEW */
-          <View>
-            <View style={styles.verifiedCard}>
-              <View style={styles.verifiedHeaderRow}>
-                <View style={styles.avatarCircle}>
-                  <UserCheck size={20} color="#FFFFFF" strokeWidth={2} />
+          userProfile.role === 'STORE_STAFF' ? (
+            /* SIGNED-IN STORE STAFF */
+            <View>
+              <View style={styles.profileHeader}>
+                <View style={styles.avatarLarge}>
+                  <Text style={styles.avatarInitialText}>{userInitial}</Text>
                 </View>
-                <View style={{ flex: 1 }}>
-                  <View style={styles.nameBadgeRow}>
-                    <Text style={styles.profileName}>{userProfile.name}</Text>
-                    <View style={styles.verifiedPill}>
-                      <CheckCircle2 size={11} color="#059669" strokeWidth={2.2} />
-                      <Text style={styles.verifiedPillText}>OTP Verified</Text>
-                    </View>
-                  </View>
-                  <Text style={styles.profilePhone}>+91 {userProfile.phone}</Text>
-                </View>
-              </View>
-
-              {/* Trust Score & KYC Status */}
-              <View style={styles.statsStrip}>
-                <View style={styles.statBox}>
-                  <Text style={styles.statLabel}>TRUST SCORE</Text>
-                  <Text style={styles.statValue}>{userProfile.trustScore}/100</Text>
-                  <Text style={styles.statSub}>Express Green Lane Eligible</Text>
-                </View>
-                <View style={styles.statDivider} />
-                <View style={styles.statBox}>
-                  <Text style={styles.statLabel}>AADHAAR / KYC</Text>
-                  <Text style={styles.statValue}>
-                    {userProfile.aadhaarLast4
-                      ? `XXXX-${userProfile.aadhaarLast4}`
-                      : 'Optional'}
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={styles.profileName} numberOfLines={1}>
+                    {userProfile.name}
                   </Text>
-                  <Text style={styles.statSub}>
-                    {userProfile.aadhaarLast4 ? 'Linked for High-Cart Limit' : 'Phone OTP Active'}
+                  <Text style={styles.profileMeta} numberOfLines={1}>
+                    Staff {userProfile.employeeId} · +91 {userProfile.phone}
                   </Text>
                 </View>
               </View>
 
-              {!userProfile.aadhaarLast4 && (
-                <View style={styles.kycOptionalBox}>
-                  <Text style={styles.kycTitle}>
-                    Optional: Link Aadhaar Last 4 Digits (Boosts Trust Score)
-                  </Text>
-                  <View style={styles.kycRow}>
-                    <TextInput
-                      style={styles.kycInput}
-                      value={kycInput}
-                      onChangeText={(t) => setKycInput(t.replace(/\D/g, '').slice(0, 4))}
-                      placeholder="Last 4 digits (e.g. 8492)"
-                      placeholderTextColor="#A1A1AA"
-                      keyboardType="numeric"
-                      maxLength={4}
-                    />
-                    <TouchableOpacity
-                      style={styles.kycBtn}
-                      onPress={() => {
-                        if (kycInput.length === 4) {
-                          linkAadhaarKyc(kycInput);
-                          setKycInput('');
-                        }
-                      }}
-                    >
-                      <Text style={styles.kycBtnText}>Link KYC</Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              )}
-            </View>
-
-            {/* ExpressCart In-Store Wallet Card */}
-            <View style={styles.walletCard}>
-              <View style={styles.walletHeader}>
-                <View style={styles.walletIconBox}>
-                  <Wallet size={18} color="#09090B" strokeWidth={1.8} />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.walletTitle}>ExpressCart Store Wallet</Text>
-                  <Text style={styles.walletSub}>
-                    1-tap instant self-checkout without banking delays
-                  </Text>
-                </View>
-                <Text style={styles.walletBalanceText}>₹{userProfile.walletBalance}</Text>
-              </View>
-
-              <View style={styles.topUpRow}>
-                {[500, 1000, 2000].map((amt) => (
-                  <TouchableOpacity
-                    key={amt}
-                    style={styles.topUpChip}
-                    onPress={() => topUpWallet(amt)}
-                    activeOpacity={0.75}
-                  >
-                    <Plus size={12} color="#09090B" strokeWidth={2.2} />
-                    <Text style={styles.topUpChipText}>Add ₹{amt}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </View>
-
-            <TouchableOpacity
-              style={styles.continueShopBtn}
-              onPress={() => router.replace('/shop')}
-              activeOpacity={0.85}
-            >
-              <Text style={styles.continueShopBtnText}>Proceed to Cart Scanner</Text>
-              <ArrowRight size={16} color="#FFFFFF" strokeWidth={2} />
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.logoutBtn}
-              onPress={logoutUser}
-              activeOpacity={0.75}
-            >
-              <LogOut size={14} color="#DC2626" strokeWidth={1.8} />
-              <Text style={styles.logoutBtnText}>Sign Out / Switch Mobile Number</Text>
-            </TouchableOpacity>
-          </View>
-        ) : (
-          /* SIGN-UP / MOBILE OTP VERIFICATION FLOW */
-          <View style={styles.authCard}>
-            <View style={styles.authBadge}>
-              <ShieldCheck size={14} color="#059669" strokeWidth={2} />
-              <Text style={styles.authBadgeText}>MANDATORY SHOPPER VERIFICATION</Text>
-            </View>
-
-            <Text style={styles.authTitle}>Verify your mobile to start scanning</Text>
-            <Text style={styles.authSub}>
-              To prevent cart misuse and enable instant UPI / Wallet self-checkout, every shopper is verified via mobile OTP.
-            </Text>
-
-            {errorMsg && (
-              <View style={styles.errorBanner}>
-                <Text style={styles.errorBannerText}>{errorMsg}</Text>
-              </View>
-            )}
-
-            <View style={styles.fieldGroup}>
-              <Text style={styles.fieldLabel}>Full Name (for GST Bill & Exit Pass)</Text>
-              <TextInput
-                style={styles.textInput}
-                value={name}
-                onChangeText={setName}
-                placeholder="e.g. Aarav Sharma"
-                placeholderTextColor="#A1A1AA"
-                editable={!otpSent}
-              />
-            </View>
-
-            <View style={styles.fieldGroup}>
-              <Text style={styles.fieldLabel}>Mobile Number (+91 India)</Text>
-              <View style={styles.phoneInputRow}>
-                <View style={styles.countryPrefix}>
-                  <Phone size={13} color="#52525B" strokeWidth={1.8} />
-                  <Text style={styles.countryPrefixText}>+91</Text>
-                </View>
-                <TextInput
-                  style={[styles.textInput, { flex: 1 }]}
-                  value={phone}
-                  onChangeText={(t) => setPhone(t.replace(/\D/g, '').slice(0, 10))}
-                  placeholder="10-digit mobile number"
-                  placeholderTextColor="#A1A1AA"
-                  keyboardType="phone-pad"
-                  maxLength={10}
-                  editable={!otpSent}
-                />
-              </View>
-            </View>
-
-            <View style={styles.fieldGroup}>
-              <Text style={styles.fieldLabel}>
-                Aadhaar Last 4 Digits (Optional — Future KYC Readiness)
-              </Text>
-              <TextInput
-                style={styles.textInput}
-                value={aadhaarLast4}
-                onChangeText={(t) => setAadhaarLast4(t.replace(/\D/g, '').slice(0, 4))}
-                placeholder="Optional 4 digits (unlocks 98% Trust Score)"
-                placeholderTextColor="#A1A1AA"
-                keyboardType="numeric"
-                maxLength={4}
-                editable={!otpSent}
-              />
-            </View>
-
-            {!otpSent ? (
               <TouchableOpacity
-                style={styles.primaryAuthBtn}
-                onPress={handleRequestOtp}
-                activeOpacity={0.85}
+                style={styles.primaryButton}
+                onPress={() => router.replace('/guard')}
+                activeOpacity={0.88}
               >
-                <Text style={styles.primaryAuthBtnText}>Send 4-Digit Verification OTP</Text>
-                <ArrowRight size={16} color="#FFFFFF" strokeWidth={2} />
+                <Text style={styles.primaryButtonLabel}>
+                  Open staff terminal
+                </Text>
               </TouchableOpacity>
-            ) : (
-              <View style={styles.otpSection}>
-                <View style={styles.otpHeaderRow}>
-                  <Lock size={14} color="#09090B" strokeWidth={2} />
-                  <Text style={styles.otpTitle}>
-                    Enter OTP sent to +91 {phone}
-                  </Text>
+
+              <TouchableOpacity
+                style={styles.signOutRow}
+                onPress={logoutUser}
+                activeOpacity={0.7}
+              >
+                <LogOut
+                  size={ICON.size}
+                  color={COLORS.danger}
+                  strokeWidth={ICON.strokeWidth}
+                />
+                <Text style={styles.signOutText}>Sign out</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            /* SIGNED-IN SHOPPER */
+            <View>
+              <View style={styles.profileHeader}>
+                <View style={styles.avatarLarge}>
+                  <Text style={styles.avatarInitialText}>{userInitial}</Text>
                 </View>
-                <Text style={styles.otpHint}>
-                  Pilot Demo OTP is <Text style={{ fontWeight: '700', color: '#09090B' }}>{PILOT_OTP}</Text> (or any 4 digits)
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={styles.profileName} numberOfLines={1}>
+                    {userProfile.name}
+                  </Text>
+                  <Text style={styles.profileMeta}>+91 {userProfile.phone}</Text>
+                </View>
+              </View>
+
+              {/* Store Wallet Surface Card */}
+              <View style={styles.walletCard}>
+                <Text style={styles.walletCaption}>Store wallet balance</Text>
+                <Text style={styles.walletBalance}>
+                  ₹{userProfile.walletBalance}
                 </Text>
 
-                <View style={styles.otpInputRow}>
-                  <TextInput
-                    style={styles.otpInput}
-                    value={otpInput}
-                    onChangeText={(t) => setOtpInput(t.replace(/\D/g, '').slice(0, 4))}
-                    placeholder="4821"
-                    placeholderTextColor="#A1A1AA"
-                    keyboardType="numeric"
-                    maxLength={4}
-                  />
-                  <TouchableOpacity
-                    style={styles.verifyOtpBtn}
-                    onPress={() => handleVerifyOtp()}
-                    activeOpacity={0.85}
-                  >
-                    <Text style={styles.verifyOtpBtnText}>Verify & Start</Text>
-                  </TouchableOpacity>
+                <View style={styles.topUpRow}>
+                  {[500, 1000, 2000].map((amt) => (
+                    <TouchableOpacity
+                      key={amt}
+                      style={styles.topUpChip}
+                      onPress={() => topUpWallet(amt)}
+                      activeOpacity={0.75}
+                    >
+                      <Plus
+                        size={14}
+                        color={COLORS.accent}
+                        strokeWidth={ICON.strokeWidth}
+                      />
+                      <Text style={styles.topUpChipText}>₹{amt}</Text>
+                    </TouchableOpacity>
+                  ))}
                 </View>
+              </View>
+
+              <TouchableOpacity
+                style={styles.primaryButton}
+                onPress={() => router.replace('/shop')}
+                activeOpacity={0.88}
+              >
+                <Text style={styles.primaryButtonLabel}>Start shopping</Text>
+              </TouchableOpacity>
+
+              <View style={styles.plainListSection}>
+                <TouchableOpacity
+                  style={styles.plainListRow}
+                  onPress={() => router.push('/orders')}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.plainListLabel}>Passes & receipts</Text>
+                  <ChevronRight
+                    size={ICON.size}
+                    color={COLORS.textSecondary}
+                    strokeWidth={ICON.strokeWidth}
+                  />
+                </TouchableOpacity>
 
                 <TouchableOpacity
-                  style={styles.autoFillOtpLink}
-                  onPress={() => {
-                    setOtpInput(PILOT_OTP);
-                    handleVerifyOtp(PILOT_OTP);
-                  }}
+                  style={[styles.plainListRow, styles.plainListDivider]}
+                  onPress={() => router.push('/legal')}
+                  activeOpacity={0.7}
                 >
-                  <Text style={styles.autoFillOtpText}>
-                    Auto-fill OTP ({PILOT_OTP}) & Continue →
+                  <Text style={styles.plainListLabel}>
+                    Terms & privacy policy
+                  </Text>
+                  <ChevronRight
+                    size={ICON.size}
+                    color={COLORS.textSecondary}
+                    strokeWidth={ICON.strokeWidth}
+                  />
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.plainListRow, styles.plainListDivider]}
+                  onPress={logoutUser}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[styles.plainListLabel, { color: COLORS.danger }]}>
+                    Sign out
                   </Text>
                 </TouchableOpacity>
               </View>
-            )}
+            </View>
+          )
+        ) : (
+          /* SIGN-IN FLOW */
+          <View>
+            <View style={styles.introBlock}>
+              <Text style={styles.pageTitle}>
+                {authTab === 'staff' ? 'Staff sign in' : 'Sign in'}
+              </Text>
+              <Text style={styles.pageBody}>
+                {authTab === 'staff'
+                  ? 'Enter your employee ID and store passcode.'
+                  : 'Enter your mobile number to start scanning items.'}
+              </Text>
+            </View>
 
-            {/* Development 1-Tap Pilot Bypass */}
-            <View style={styles.devBypassBox}>
+            <View style={styles.formSection}>
+              {authTab === 'staff' && (
+                <View style={styles.twoColRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fieldLabel}>Employee ID</Text>
+                    <TextInput
+                      style={styles.textInput}
+                      value={employeeId}
+                      onChangeText={(t) => setEmployeeId(t.toUpperCase())}
+                      placeholder="EMP-101"
+                      placeholderTextColor={COLORS.textSecondary}
+                      autoCapitalize="characters"
+                      editable={!otpSent}
+                    />
+                  </View>
+
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fieldLabel}>Passcode</Text>
+                    <TextInput
+                      style={styles.textInput}
+                      value={storePasscode}
+                      onChangeText={(t) =>
+                        setStorePasscode(t.replace(/\D/g, '').slice(0, 4))
+                      }
+                      placeholder="1234"
+                      placeholderTextColor={COLORS.textSecondary}
+                      keyboardType="numeric"
+                      secureTextEntry
+                      maxLength={4}
+                      editable={!otpSent}
+                    />
+                  </View>
+                </View>
+              )}
+
+              <View style={styles.fieldGroup}>
+                <Text style={styles.fieldLabel}>Your name</Text>
+                <TextInput
+                  style={styles.textInput}
+                  value={name}
+                  onChangeText={setName}
+                  placeholder="Aarav Sharma"
+                  placeholderTextColor={COLORS.textSecondary}
+                  editable={!otpSent}
+                />
+              </View>
+
+              <View style={styles.fieldGroup}>
+                <Text style={styles.fieldLabel}>Mobile number</Text>
+                <View style={styles.phoneInputRow}>
+                  <View style={styles.countryPrefix}>
+                    <Text style={styles.countryPrefixText}>+91</Text>
+                  </View>
+                  <TextInput
+                    style={[styles.textInput, { flex: 1 }]}
+                    value={phone}
+                    onChangeText={(t) =>
+                      setPhone(t.replace(/\D/g, '').slice(0, 10))
+                    }
+                    placeholder="10-digit mobile number"
+                    placeholderTextColor={COLORS.textSecondary}
+                    keyboardType="phone-pad"
+                    maxLength={10}
+                    editable={!otpSent}
+                  />
+                </View>
+              </View>
+
+              {otpSent && (
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>
+                    4-digit code sent to +91 {phone}
+                  </Text>
+                  <TextInput
+                    style={styles.textInput}
+                    value={otpInput}
+                    onChangeText={(t) =>
+                      setOtpInput(t.replace(/\D/g, '').slice(0, 4))
+                    }
+                    placeholder="Enter any 4 digits (e.g. 4821)"
+                    placeholderTextColor={COLORS.textSecondary}
+                    keyboardType="numeric"
+                    maxLength={4}
+                  />
+                </View>
+              )}
+
+              <View style={styles.consentRow}>
+                <TouchableOpacity
+                  style={[
+                    styles.consentCheckbox,
+                    legalAccepted && styles.consentCheckboxChecked,
+                  ]}
+                  onPress={() => {
+                    setLegalAccepted(!legalAccepted);
+                    setErrorMsg(null);
+                  }}
+                  activeOpacity={0.75}
+                  accessibilityRole="checkbox"
+                  accessibilityState={{ checked: legalAccepted }}
+                >
+                  {legalAccepted && (
+                    <Check
+                      size={14}
+                      color={COLORS.white}
+                      strokeWidth={ICON.strokeWidth}
+                    />
+                  )}
+                </TouchableOpacity>
+
+                <View style={styles.consentTextWrap}>
+                  <Text style={styles.consentText}>
+                    I agree to the{' '}
+                    <Text
+                      style={styles.consentLink}
+                      onPress={() => router.push('/legal?tab=terms')}
+                    >
+                      Terms & Conditions
+                    </Text>{' '}
+                    and{' '}
+                    <Text
+                      style={styles.consentLink}
+                      onPress={() => router.push('/legal?tab=privacy')}
+                    >
+                      Privacy Policy
+                    </Text>{' '}
+                    (incl. exit gate verification).
+                  </Text>
+                </View>
+              </View>
+
+              {errorMsg && <Text style={styles.errorText}>{errorMsg}</Text>}
+
               <TouchableOpacity
-                style={styles.devBypassBtn}
-                onPress={handleQuickPilotLogin}
-                activeOpacity={0.8}
+                style={styles.primaryButton}
+                disabled={isSubmitting}
+                onPress={otpSent ? handleVerifyOtp : handleRequestOtp}
+                activeOpacity={0.88}
               >
-                <Sparkles size={14} color="#09090B" strokeWidth={1.8} />
-                <Text style={styles.devBypassText}>
-                  1-Tap Demo Login (Aarav Sharma · +91 9820411290 · ₹1,500 Wallet)
+                <Text style={styles.primaryButtonLabel}>
+                  {!otpSent
+                    ? 'Continue'
+                    : isSubmitting
+                    ? 'Signing in...'
+                    : 'Verify & start shopping'}
                 </Text>
               </TouchableOpacity>
+
+              {otpSent && (
+                <TouchableOpacity
+                  style={styles.switchRoleLink}
+                  onPress={() => {
+                    setOtpSent(false);
+                    setOtpInput('');
+                  }}
+                >
+                  <Text style={styles.switchRoleText}>
+                    Change mobile number
+                  </Text>
+                </TouchableOpacity>
+              )}
             </View>
+
+            <TouchableOpacity
+              style={styles.switchRoleLink}
+              onPress={() => {
+                setAuthTab(authTab === 'shopper' ? 'staff' : 'shopper');
+                setOtpSent(false);
+                setErrorMsg(null);
+              }}
+            >
+              <Text style={styles.switchRoleText}>
+                {authTab === 'shopper'
+                  ? 'Store staff? Sign in here'
+                  : 'Back to customer sign in'}
+              </Text>
+            </TouchableOpacity>
           </View>
         )}
       </ScrollView>
@@ -343,416 +452,251 @@ export default function AuthScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (COLORS: ThemeColors) => StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: '#FAFAFA',
+    backgroundColor: COLORS.background,
   },
   scrollContent: {
-    padding: 20,
-    paddingBottom: 44,
-    maxWidth: 540,
-    width: '100%',
-    alignSelf: 'center',
+    paddingHorizontal: SPACING.page,
+    paddingTop: SPACING.page,
+    paddingBottom: SPACING.xl,
   },
-  authCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 22,
-    borderWidth: 1,
-    borderColor: '#E4E4E7',
+  introBlock: {
+    marginBottom: SPACING.section,
   },
-  authBadge: {
+  pageTitle: {
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.titleSize,
+    fontWeight: TYPOGRAPHY.weightSemibold,
+    color: COLORS.textPrimary,
+    letterSpacing: -0.3,
+    marginBottom: SPACING.xs,
+  },
+  pageBody: {
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.bodySize,
+    fontWeight: TYPOGRAPHY.weightRegular,
+    color: COLORS.textSecondary,
+    lineHeight: 22,
+  },
+  formSection: {
+    gap: SPACING.page,
+  },
+  twoColRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    alignSelf: 'flex-start',
-    gap: 6,
-    backgroundColor: '#ECFDF5',
-    borderWidth: 1,
-    borderColor: '#A7F3D0',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 999,
-    marginBottom: 12,
-  },
-  authBadgeText: {
-    color: '#065F46',
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 0.6,
-  },
-  authTitle: {
-    color: '#09090B',
-    fontSize: 22,
-    fontWeight: '600',
-    letterSpacing: -0.4,
-    marginBottom: 6,
-  },
-  authSub: {
-    color: '#52525B',
-    fontSize: 13,
-    lineHeight: 19,
-    marginBottom: 18,
-  },
-  errorBanner: {
-    backgroundColor: '#FEF2F2',
-    borderWidth: 1,
-    borderColor: '#FECACA',
-    borderRadius: 10,
-    padding: 10,
-    marginBottom: 14,
-  },
-  errorBannerText: {
-    color: '#991B1B',
-    fontSize: 12,
-    fontWeight: '500',
+    gap: SPACING.md,
   },
   fieldGroup: {
-    marginBottom: 14,
+    gap: SPACING.xs,
   },
   fieldLabel: {
-    color: '#27272A',
-    fontSize: 12,
-    fontWeight: '600',
-    marginBottom: 6,
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.captionSize,
+    fontWeight: TYPOGRAPHY.weightRegular,
+    color: COLORS.textSecondary,
   },
   textInput: {
-    backgroundColor: '#FAFAFA',
-    borderWidth: 1,
-    borderColor: '#E4E4E7',
-    borderRadius: 10,
-    paddingHorizontal: 13,
-    paddingVertical: 11,
-    color: '#09090B',
-    fontSize: 14,
-    fontWeight: '500',
+    height: 48,
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.card,
+    paddingHorizontal: SPACING.page,
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.bodySize,
+    fontWeight: TYPOGRAPHY.weightRegular,
+    color: COLORS.textPrimary,
   },
   phoneInputRow: {
     flexDirection: 'row',
-    gap: 8,
+    gap: SPACING.sm,
   },
   countryPrefix: {
-    flexDirection: 'row',
+    height: 48,
+    paddingHorizontal: SPACING.page,
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.card,
     alignItems: 'center',
-    gap: 5,
-    backgroundColor: '#F4F4F5',
-    borderWidth: 1,
-    borderColor: '#E4E4E7',
-    borderRadius: 10,
-    paddingHorizontal: 12,
+    justifyContent: 'center',
   },
   countryPrefixText: {
-    color: '#18181B',
-    fontSize: 13,
-    fontWeight: '600',
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.bodySize,
+    fontWeight: TYPOGRAPHY.weightSemibold,
+    color: COLORS.textPrimary,
   },
-  primaryAuthBtn: {
-    backgroundColor: '#09090B',
-    borderRadius: 12,
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-    flexDirection: 'row',
+  errorText: {
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.captionSize,
+    fontWeight: TYPOGRAPHY.weightRegular,
+    color: COLORS.danger,
+  },
+  primaryButton: {
+    height: TOUCH_TARGET.primaryButtonHeight,
+    backgroundColor: COLORS.accent,
+    borderRadius: RADIUS.button,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    marginTop: 4,
+    width: '100%',
   },
-  primaryAuthBtnText: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    fontWeight: '600',
+  primaryButtonLabel: {
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.bodySize,
+    fontWeight: TYPOGRAPHY.weightSemibold,
+    color: COLORS.white,
   },
-  otpSection: {
-    marginTop: 8,
-    paddingTop: 14,
-    borderTopWidth: 1,
-    borderTopColor: '#F4F4F5',
-  },
-  otpHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginBottom: 4,
-  },
-  otpTitle: {
-    color: '#09090B',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  otpHint: {
-    color: '#71717A',
-    fontSize: 12,
-    marginBottom: 10,
-  },
-  otpInputRow: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  otpInput: {
-    flex: 1,
-    backgroundColor: '#FAFAFA',
-    borderWidth: 1,
-    borderColor: '#09090B',
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 11,
-    color: '#09090B',
-    fontSize: 16,
-    fontWeight: '700',
-    letterSpacing: 4,
-  },
-  verifyOtpBtn: {
-    backgroundColor: '#059669',
-    borderRadius: 10,
-    paddingHorizontal: 18,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  verifyOtpBtnText: {
-    color: '#FFFFFF',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  autoFillOtpLink: {
-    marginTop: 10,
-    paddingVertical: 4,
-  },
-  autoFillOtpText: {
-    color: '#059669',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  devBypassBox: {
-    marginTop: 18,
-    paddingTop: 16,
-    borderTopWidth: 1,
-    borderTopColor: '#F4F4F5',
-  },
-  devBypassBtn: {
-    flexDirection: 'row',
+  switchRoleLink: {
+    minHeight: TOUCH_TARGET.min,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    backgroundColor: '#F4F4F5',
-    borderWidth: 1,
-    borderColor: '#E4E4E7',
-    borderRadius: 10,
-    paddingVertical: 11,
-    paddingHorizontal: 12,
+    marginTop: SPACING.md,
   },
-  devBypassText: {
-    color: '#18181B',
-    fontSize: 12,
-    fontWeight: '600',
+  switchRoleText: {
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.bodySize,
+    fontWeight: TYPOGRAPHY.weightRegular,
+    color: COLORS.accent,
   },
-  // Profile & Wallet Styles
-  verifiedCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: '#E4E4E7',
-    marginBottom: 14,
-  },
-  verifiedHeaderRow: {
+  profileHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
-    marginBottom: 16,
+    gap: SPACING.page,
+    marginBottom: SPACING.section,
   },
-  avatarCircle: {
-    width: 44,
-    height: 44,
-    borderRadius: 12,
-    backgroundColor: '#09090B',
+  avatarLarge: {
+    width: 52,
+    height: 52,
+    borderRadius: RADIUS.full,
+    backgroundColor: COLORS.discountBg,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  nameBadgeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    flexWrap: 'wrap',
+  avatarInitialText: {
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.titleSize,
+    fontWeight: TYPOGRAPHY.weightSemibold,
+    color: COLORS.accent,
   },
   profileName: {
-    color: '#09090B',
-    fontSize: 17,
-    fontWeight: '600',
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.titleSize,
+    fontWeight: TYPOGRAPHY.weightSemibold,
+    color: COLORS.textPrimary,
   },
-  verifiedPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: '#ECFDF5',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 999,
-  },
-  verifiedPillText: {
-    color: '#065F46',
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  profilePhone: {
-    color: '#71717A',
-    fontSize: 13,
+  profileMeta: {
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.bodySize,
+    fontWeight: TYPOGRAPHY.weightRegular,
+    color: COLORS.textSecondary,
     marginTop: 2,
   },
-  statsStrip: {
-    flexDirection: 'row',
-    backgroundColor: '#FAFAFA',
-    borderRadius: 12,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: '#E4E4E7',
-  },
-  statBox: {
-    flex: 1,
-  },
-  statDivider: {
-    width: 1,
-    backgroundColor: '#E4E4E7',
-    marginHorizontal: 14,
-  },
-  statLabel: {
-    color: '#71717A',
-    fontSize: 10,
-    fontWeight: '600',
-    letterSpacing: 0.5,
-  },
-  statValue: {
-    color: '#09090B',
-    fontSize: 18,
-    fontWeight: '700',
-    marginVertical: 2,
-  },
-  statSub: {
-    color: '#059669',
-    fontSize: 11,
-    fontWeight: '500',
-  },
-  kycOptionalBox: {
-    marginTop: 14,
-    paddingTop: 14,
-    borderTopWidth: 1,
-    borderTopColor: '#F4F4F5',
-  },
-  kycTitle: {
-    color: '#52525B',
-    fontSize: 12,
-    fontWeight: '500',
-    marginBottom: 8,
-  },
-  kycRow: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  kycInput: {
-    flex: 1,
-    backgroundColor: '#FAFAFA',
-    borderWidth: 1,
-    borderColor: '#E4E4E7',
-    borderRadius: 9,
-    paddingHorizontal: 12,
-    paddingVertical: 9,
-    fontSize: 13,
-    color: '#09090B',
-  },
-  kycBtn: {
-    backgroundColor: '#18181B',
-    borderRadius: 9,
-    paddingHorizontal: 14,
-    justifyContent: 'center',
-  },
-  kycBtnText: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: '600',
-  },
   walletCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: '#E4E4E7',
-    marginBottom: 14,
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.card,
+    padding: SPACING.page,
+    marginBottom: SPACING.section,
   },
-  walletHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    marginBottom: 14,
+  walletCaption: {
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.captionSize,
+    fontWeight: TYPOGRAPHY.weightRegular,
+    color: COLORS.textSecondary,
+    marginBottom: SPACING.xs,
   },
-  walletIconBox: {
-    width: 40,
-    height: 40,
-    borderRadius: 10,
-    backgroundColor: '#F4F4F5',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  walletTitle: {
-    color: '#09090B',
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  walletSub: {
-    color: '#71717A',
-    fontSize: 12,
-    marginTop: 1,
-  },
-  walletBalanceText: {
-    color: '#09090B',
-    fontSize: 22,
-    fontWeight: '700',
+  walletBalance: {
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.titleSize,
+    fontWeight: TYPOGRAPHY.weightSemibold,
+    color: COLORS.textPrimary,
+    marginBottom: SPACING.page,
   },
   topUpRow: {
     flexDirection: 'row',
-    gap: 8,
+    gap: SPACING.sm,
   },
   topUpChip: {
-    flex: 1,
+    minHeight: 38,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: 4,
-    backgroundColor: '#FAFAFA',
-    borderWidth: 1,
-    borderColor: '#D4D4D8',
-    borderRadius: 9,
-    paddingVertical: 9,
+    gap: SPACING.xs,
+    backgroundColor: COLORS.discountBg,
+    paddingHorizontal: SPACING.md,
+    borderRadius: RADIUS.card,
   },
   topUpChipText: {
-    color: '#09090B',
-    fontSize: 12,
-    fontWeight: '600',
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.bodySize,
+    fontWeight: TYPOGRAPHY.weightSemibold,
+    color: COLORS.discountText,
   },
-  continueShopBtn: {
-    backgroundColor: '#09090B',
-    borderRadius: 12,
-    paddingVertical: 15,
+  plainListSection: {
+    marginTop: SPACING.section,
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: COLORS.divider,
+  },
+  plainListRow: {
+    minHeight: 56,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: SPACING.md,
+  },
+  plainListDivider: {
+    borderTopWidth: 1,
+    borderTopColor: COLORS.divider,
+  },
+  plainListLabel: {
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.bodySize,
+    fontWeight: TYPOGRAPHY.weightRegular,
+    color: COLORS.textPrimary,
+  },
+  signOutRow: {
+    minHeight: TOUCH_TARGET.min,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    marginBottom: 10,
+    gap: SPACING.sm,
+    marginTop: SPACING.section,
   },
-  continueShopBtnText: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    fontWeight: '600',
+  signOutText: {
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.bodySize,
+    fontWeight: TYPOGRAPHY.weightRegular,
+    color: COLORS.danger,
   },
-  logoutBtn: {
+  consentRow: {
     flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: SPACING.sm,
+    paddingTop: SPACING.xs,
+  },
+  consentCheckbox: {
+    width: 22,
+    height: 22,
+    borderRadius: 6,
+    borderWidth: 1.5,
+    borderColor: COLORS.textSecondary,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 12,
+    marginTop: 2,
   },
-  logoutBtnText: {
-    color: '#DC2626',
-    fontSize: 13,
-    fontWeight: '500',
+  consentCheckboxChecked: {
+    backgroundColor: COLORS.accent,
+    borderColor: COLORS.accent,
+  },
+  consentTextWrap: {
+    flex: 1,
+  },
+  consentText: {
+    fontFamily: FONTS.sans,
+    fontSize: TYPOGRAPHY.captionSize,
+    fontWeight: TYPOGRAPHY.weightRegular,
+    color: COLORS.textSecondary,
+    lineHeight: 18,
+  },
+  consentLink: {
+    color: COLORS.accent,
+    fontWeight: TYPOGRAPHY.weightSemibold,
   },
 });
-
