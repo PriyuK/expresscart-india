@@ -2,13 +2,30 @@ import { Platform } from 'react-native';
 
 function getApiBaseOrigins(): string[] {
   const origins: string[] = [];
+  const pushUnique = (origin?: string | null) => {
+    if (!origin) return;
+    const normalized = origin.replace(/\/$/, '');
+    if (normalized && !origins.includes(normalized)) {
+      origins.push(normalized);
+    }
+  };
+
   if (process.env.EXPO_PUBLIC_BACKEND_URL) {
-    origins.push(process.env.EXPO_PUBLIC_BACKEND_URL.replace(/\/$/, ''));
+    pushUnique(process.env.EXPO_PUBLIC_BACKEND_URL);
   }
+
   if (Platform.OS === 'web' && typeof window !== 'undefined') {
-    origins.push(window.location.origin);
+    const hostname = window.location.hostname;
+    if (hostname === 'localhost' || hostname === '127.0.0.1') {
+      pushUnique('http://localhost:4000');
+      pushUnique(window.location.origin);
+    } else {
+      pushUnique(window.location.origin);
+    }
+  } else {
+    pushUnique('http://localhost:4000');
   }
-  origins.push('http://localhost:4000');
+
   return origins;
 }
 
@@ -45,10 +62,13 @@ export async function callBackendApi<T = any>(
 
   const origins = getApiBaseOrigins();
   for (const origin of origins) {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 1800);
+    const isLocalOrigin =
+      origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1');
+    const timeoutMs = isLocalOrigin ? 2500 : 8000;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
+    try {
       const res = await fetch(`${origin}${endpoint}${queryString}`, {
         method,
         headers: {
@@ -58,7 +78,6 @@ export async function callBackendApi<T = any>(
         body: options?.body ? JSON.stringify(options.body) : undefined,
         signal: controller.signal,
       });
-      clearTimeout(timeoutId);
 
       const contentType = res.headers.get('content-type') || '';
       if (res.ok && contentType.includes('application/json')) {
@@ -67,6 +86,8 @@ export async function callBackendApi<T = any>(
       }
     } catch {
       // Try next origin or fall back to offline cache
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 

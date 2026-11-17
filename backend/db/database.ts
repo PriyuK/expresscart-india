@@ -88,9 +88,43 @@ export interface BackendExitPass {
 }
 
 let _pgInitialized = false;
+let _pgInitPromise: Promise<boolean> | null = null;
+
+function readEnvLocalValue(keys: string[]): string | null {
+  try {
+    const envPath = path.join(process.cwd(), '.env.local');
+    if (!fs.existsSync(envPath)) return null;
+    const raw = fs.readFileSync(envPath, 'utf-8');
+    const parsed: Record<string, string> = {};
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx <= 0) continue;
+      const key = trimmed.slice(0, eqIdx).trim();
+      let val = trimmed.slice(eqIdx + 1).trim();
+      if (
+        (val.startsWith('"') && val.endsWith('"')) ||
+        (val.startsWith("'") && val.endsWith("'"))
+      ) {
+        val = val.slice(1, -1);
+      }
+      parsed[key] = val;
+    }
+    for (const key of keys) {
+      if (parsed[key]) return parsed[key];
+    }
+  } catch {}
+  return null;
+}
 
 function getDatabaseUrl(): string | null {
-  return process.env.DATABASE_URL || process.env.POSTGRES_URL || null;
+  return (
+    process.env.DATABASE_URL ||
+    process.env.POSTGRES_URL ||
+    readEnvLocalValue(['DATABASE_URL', 'POSTGRES_URL']) ||
+    null
+  );
 }
 
 function getSql() {
@@ -107,181 +141,192 @@ async function ensurePostgresSchemaAndSeed(): Promise<boolean> {
   const sql = getSql();
   if (!sql) return false;
   if (_pgInitialized) return true;
+  if (_pgInitPromise) return _pgInitPromise;
 
-  try {
-    await sql`
-      CREATE TABLE IF NOT EXISTS stores (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL UNIQUE,
-        short_name TEXT NOT NULL,
-        chain TEXT NOT NULL,
-        city TEXT NOT NULL,
-        lane TEXT NOT NULL,
-        latitude DOUBLE PRECISION NOT NULL,
-        longitude DOUBLE PRECISION NOT NULL,
-        catalog_version TEXT NOT NULL,
-        catalog_size_kb INTEGER NOT NULL DEFAULT 412,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `;
-
-    await sql`
-      CREATE TABLE IF NOT EXISTS products (
-        barcode TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        brand TEXT NOT NULL,
-        unit TEXT NOT NULL,
-        category TEXT NOT NULL,
-        mrp INTEGER NOT NULL,
-        store_price INTEGER NOT NULL,
-        weight_grams INTEGER NOT NULL,
-        emoji TEXT NOT NULL,
-        bg_color TEXT NOT NULL,
-        accent_color TEXT NOT NULL,
-        aisle TEXT NOT NULL,
-        gst_percent INTEGER NOT NULL DEFAULT 12,
-        offer_type TEXT NOT NULL DEFAULT 'NONE',
-        offer_tag TEXT,
-        package_color_hex TEXT NOT NULL,
-        package_color_name TEXT NOT NULL,
-        is_quick_test BOOLEAN NOT NULL DEFAULT FALSE,
-        is_high_value_audit BOOLEAN NOT NULL DEFAULT FALSE
-      )
-    `;
-
-    await sql`
-      CREATE TABLE IF NOT EXISTS users (
-        phone TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        role TEXT NOT NULL DEFAULT 'SHOPPER',
-        employee_id TEXT,
-        assigned_store TEXT,
-        is_verified BOOLEAN NOT NULL DEFAULT TRUE,
-        aadhaar_last4 TEXT,
-        trust_score INTEGER NOT NULL DEFAULT 95,
-        wallet_balance INTEGER NOT NULL DEFAULT 1500,
-        verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `;
-
-    // Ensure role & employee_id columns exist if table was created earlier
+  _pgInitPromise = (async () => {
     try {
-      await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'SHOPPER'`;
-      await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS employee_id TEXT`;
-      await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS assigned_store TEXT`;
-    } catch {}
-
-    await sql`
-      CREATE TABLE IF NOT EXISTS family_sessions (
-        pin_code TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        host_name TEXT NOT NULL,
-        host_phone TEXT NOT NULL,
-        member_name TEXT NOT NULL,
-        is_active BOOLEAN NOT NULL DEFAULT TRUE,
-        cart1_items JSONB NOT NULL DEFAULT '[]'::jsonb,
-        cart2_items JSONB NOT NULL DEFAULT '[]'::jsonb,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `;
-
-    await sql`
-      CREATE TABLE IF NOT EXISTS orders (
-        order_id TEXT PRIMARY KEY,
-        store_name TEXT NOT NULL,
-        customer_name TEXT NOT NULL,
-        customer_phone TEXT NOT NULL,
-        customer_trust_score INTEGER NOT NULL DEFAULT 95,
-        payment_method TEXT NOT NULL,
-        upi_ref TEXT NOT NULL,
-        signature TEXT NOT NULL,
-        total_price INTEGER NOT NULL,
-        total_mrp INTEGER NOT NULL,
-        total_savings INTEGER NOT NULL,
-        promo_savings INTEGER NOT NULL DEFAULT 0,
-        total_item_count INTEGER NOT NULL,
-        cart_weight_grams INTEGER NOT NULL,
-        is_family_order BOOLEAN NOT NULL DEFAULT FALSE,
-        family_session_code TEXT,
-        cart1_item_count INTEGER NOT NULL DEFAULT 0,
-        cart1_weight_grams INTEGER NOT NULL DEFAULT 0,
-        cart2_item_count INTEGER NOT NULL DEFAULT 0,
-        cart2_weight_grams INTEGER NOT NULL DEFAULT 0,
-        audit_items JSONB NOT NULL DEFAULT '[]'::jsonb,
-        all_paid_items JSONB NOT NULL DEFAULT '[]'::jsonb,
-        security_flags JSONB NOT NULL DEFAULT '[]'::jsonb,
-        actual_physical_items JSONB NOT NULL DEFAULT '[]'::jsonb,
-        exit_verified BOOLEAN NOT NULL DEFAULT FALSE,
-        verified_by_staff_id TEXT,
-        verified_at TIMESTAMPTZ,
-        requires_counter_checkout BOOLEAN NOT NULL DEFAULT FALSE,
-        verification_mode TEXT,
-        counter_status TEXT,
-        physical_bill_ref TEXT,
-        counter_resolution_type TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `;
-
-    try {
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS verified_by_staff_id TEXT`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS requires_counter_checkout BOOLEAN NOT NULL DEFAULT FALSE`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS verification_mode TEXT`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS counter_status TEXT`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS physical_bill_ref TEXT`;
-      await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS counter_resolution_type TEXT`;
-    } catch {}
-
-    // Seed default verified customer and store staff accounts
-    await sql`
-      INSERT INTO users (phone, name, role, is_verified, aadhaar_last4, trust_score, wallet_balance)
-      VALUES ('9820411290', 'Aarav Sharma', 'SHOPPER', TRUE, '8492', 98, 1500)
-      ON CONFLICT (phone) DO NOTHING
-    `;
-
-    await sql`
-      INSERT INTO users (phone, name, role, employee_id, assigned_store, is_verified, trust_score, wallet_balance)
-      VALUES ('9820099100', 'Rajesh Deshmukh (Gate Staff)', 'STORE_STAFF', 'EMP-101', 'Reliance/DMart Express Pilot - Store #01', TRUE, 100, 0)
-      ON CONFLICT (phone) DO NOTHING
-    `;
-
-    // Seed stores if empty
-    const existingStores = await sql`SELECT COUNT(*)::int AS cnt FROM stores`;
-    if ((existingStores[0]?.cnt ?? 0) === 0) {
-      for (const s of SEED_STORES) {
-        await sql`
-          INSERT INTO stores (id, name, short_name, chain, city, lane, latitude, longitude, catalog_version, catalog_size_kb)
-          VALUES (${s.id}, ${s.name}, ${s.shortName}, ${s.chain}, ${s.city}, ${s.lane}, ${s.latitude}, ${s.longitude}, ${s.catalogVersion}, ${s.catalogSizeKb})
-          ON CONFLICT (id) DO NOTHING
-        `;
-      }
-    }
-
-    // Seed products if empty
-    const existingProducts = await sql`SELECT COUNT(*)::int AS cnt FROM products`;
-    if ((existingProducts[0]?.cnt ?? 0) === 0) {
-      for (const p of SEED_PRODUCTS) {
-        await sql`
-          INSERT INTO products (
-            barcode, name, brand, unit, category, mrp, store_price, weight_grams,
-            emoji, bg_color, accent_color, aisle, gst_percent, offer_type, offer_tag,
-            package_color_hex, package_color_name, is_quick_test, is_high_value_audit
-          ) VALUES (
-            ${p.barcode}, ${p.name}, ${p.brand}, ${p.unit}, ${p.category}, ${p.mrp}, ${p.storePrice}, ${p.weightGrams},
-            ${p.emoji}, ${p.bgColor}, ${p.accentColor}, ${p.aisle}, ${p.gstPercent}, ${p.offerType || 'NONE'}, ${p.offerTag || null},
-            ${p.packageColorHex}, ${p.packageColorName}, ${Boolean(p.isQuickTest)}, ${Boolean(p.isHighValueAudit)}
+      await Promise.all([
+        sql`
+          CREATE TABLE IF NOT EXISTS stores (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            short_name TEXT NOT NULL,
+            chain TEXT NOT NULL,
+            city TEXT NOT NULL,
+            lane TEXT NOT NULL,
+            latitude DOUBLE PRECISION NOT NULL,
+            longitude DOUBLE PRECISION NOT NULL,
+            catalog_version TEXT NOT NULL,
+            catalog_size_kb INTEGER NOT NULL DEFAULT 412,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
           )
-          ON CONFLICT (barcode) DO NOTHING
-        `;
-      }
-    }
+        `,
+        sql`
+          CREATE TABLE IF NOT EXISTS products (
+            barcode TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            brand TEXT NOT NULL,
+            unit TEXT NOT NULL,
+            category TEXT NOT NULL,
+            mrp INTEGER NOT NULL,
+            store_price INTEGER NOT NULL,
+            weight_grams INTEGER NOT NULL,
+            emoji TEXT NOT NULL,
+            bg_color TEXT NOT NULL,
+            accent_color TEXT NOT NULL,
+            aisle TEXT NOT NULL,
+            gst_percent INTEGER NOT NULL DEFAULT 12,
+            offer_type TEXT NOT NULL DEFAULT 'NONE',
+            offer_tag TEXT,
+            package_color_hex TEXT NOT NULL,
+            package_color_name TEXT NOT NULL,
+            is_quick_test BOOLEAN NOT NULL DEFAULT FALSE,
+            is_high_value_audit BOOLEAN NOT NULL DEFAULT FALSE
+          )
+        `,
+        sql`
+          CREATE TABLE IF NOT EXISTS users (
+            phone TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'SHOPPER',
+            employee_id TEXT,
+            assigned_store TEXT,
+            is_verified BOOLEAN NOT NULL DEFAULT TRUE,
+            aadhaar_last4 TEXT,
+            trust_score INTEGER NOT NULL DEFAULT 95,
+            wallet_balance INTEGER NOT NULL DEFAULT 1500,
+            verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          )
+        `,
+        sql`
+          CREATE TABLE IF NOT EXISTS family_sessions (
+            pin_code TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            host_name TEXT NOT NULL,
+            host_phone TEXT NOT NULL,
+            member_name TEXT NOT NULL,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            cart1_items JSONB NOT NULL DEFAULT '[]'::jsonb,
+            cart2_items JSONB NOT NULL DEFAULT '[]'::jsonb,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          )
+        `,
+        sql`
+          CREATE TABLE IF NOT EXISTS orders (
+            order_id TEXT PRIMARY KEY,
+            store_name TEXT NOT NULL,
+            customer_name TEXT NOT NULL,
+            customer_phone TEXT NOT NULL,
+            customer_trust_score INTEGER NOT NULL DEFAULT 95,
+            payment_method TEXT NOT NULL,
+            upi_ref TEXT NOT NULL,
+            signature TEXT NOT NULL,
+            total_price INTEGER NOT NULL,
+            total_mrp INTEGER NOT NULL,
+            total_savings INTEGER NOT NULL,
+            promo_savings INTEGER NOT NULL DEFAULT 0,
+            total_item_count INTEGER NOT NULL,
+            cart_weight_grams INTEGER NOT NULL,
+            is_family_order BOOLEAN NOT NULL DEFAULT FALSE,
+            family_session_code TEXT,
+            cart1_item_count INTEGER NOT NULL DEFAULT 0,
+            cart1_weight_grams INTEGER NOT NULL DEFAULT 0,
+            cart2_item_count INTEGER NOT NULL DEFAULT 0,
+            cart2_weight_grams INTEGER NOT NULL DEFAULT 0,
+            audit_items JSONB NOT NULL DEFAULT '[]'::jsonb,
+            all_paid_items JSONB NOT NULL DEFAULT '[]'::jsonb,
+            security_flags JSONB NOT NULL DEFAULT '[]'::jsonb,
+            actual_physical_items JSONB NOT NULL DEFAULT '[]'::jsonb,
+            exit_verified BOOLEAN NOT NULL DEFAULT FALSE,
+            verified_by_staff_id TEXT,
+            verified_at TIMESTAMPTZ,
+            requires_counter_checkout BOOLEAN NOT NULL DEFAULT FALSE,
+            verification_mode TEXT,
+            counter_status TEXT,
+            physical_bill_ref TEXT,
+            counter_resolution_type TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          )
+        `,
+      ]);
 
-    _pgInitialized = true;
-    return true;
-  } catch {
-    return false;
-  }
+      // Ensure newer columns exist if tables were created by an earlier schema
+      await Promise.allSettled([
+        sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'SHOPPER'`,
+        sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS employee_id TEXT`,
+        sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS assigned_store TEXT`,
+        sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS verified_by_staff_id TEXT`,
+        sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ`,
+        sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS requires_counter_checkout BOOLEAN NOT NULL DEFAULT FALSE`,
+        sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS verification_mode TEXT`,
+        sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS counter_status TEXT`,
+        sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS physical_bill_ref TEXT`,
+        sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS counter_resolution_type TEXT`,
+      ]);
+
+      // Seed default accounts and check store/product counts in parallel
+      const [, , existingStores, existingProducts] = await Promise.all([
+        sql`
+          INSERT INTO users (phone, name, role, is_verified, aadhaar_last4, trust_score, wallet_balance)
+          VALUES ('9820411290', 'Aarav Sharma', 'SHOPPER', TRUE, '8492', 98, 1500)
+          ON CONFLICT (phone) DO NOTHING
+        `,
+        sql`
+          INSERT INTO users (phone, name, role, employee_id, assigned_store, is_verified, trust_score, wallet_balance)
+          VALUES ('9820099100', 'Rajesh Deshmukh (Gate Staff)', 'STORE_STAFF', 'EMP-101', 'Reliance/DMart Express Pilot - Store #01', TRUE, 100, 0)
+          ON CONFLICT (phone) DO NOTHING
+        `,
+        sql`SELECT COUNT(*)::int AS cnt FROM stores`,
+        sql`SELECT COUNT(*)::int AS cnt FROM products`,
+      ]);
+
+      const seedBatches: Promise<any>[] = [];
+
+      if ((existingStores[0]?.cnt ?? 0) === 0) {
+        seedBatches.push(
+          ...SEED_STORES.map(
+            (s) => sql`
+              INSERT INTO stores (id, name, short_name, chain, city, lane, latitude, longitude, catalog_version, catalog_size_kb)
+              VALUES (${s.id}, ${s.name}, ${s.shortName}, ${s.chain}, ${s.city}, ${s.lane}, ${s.latitude}, ${s.longitude}, ${s.catalogVersion}, ${s.catalogSizeKb})
+              ON CONFLICT (id) DO NOTHING
+            `
+          )
+        );
+      }
+
+      if ((existingProducts[0]?.cnt ?? 0) === 0) {
+        seedBatches.push(
+          ...SEED_PRODUCTS.map(
+            (p) => sql`
+              INSERT INTO products (
+                barcode, name, brand, unit, category, mrp, store_price, weight_grams,
+                emoji, bg_color, accent_color, aisle, gst_percent, offer_type, offer_tag,
+                package_color_hex, package_color_name, is_quick_test, is_high_value_audit
+              ) VALUES (
+                ${p.barcode}, ${p.name}, ${p.brand}, ${p.unit}, ${p.category}, ${p.mrp}, ${p.storePrice}, ${p.weightGrams},
+                ${p.emoji}, ${p.bgColor}, ${p.accentColor}, ${p.aisle}, ${p.gstPercent}, ${p.offerType || 'NONE'}, ${p.offerTag || null},
+                ${p.packageColorHex}, ${p.packageColorName}, ${Boolean(p.isQuickTest)}, ${Boolean(p.isHighValueAudit)}
+              )
+              ON CONFLICT (barcode) DO NOTHING
+            `
+          )
+        );
+      }
+
+      if (seedBatches.length > 0) {
+        await Promise.all(seedBatches);
+      }
+
+      _pgInitialized = true;
+      return true;
+    } catch (err) {
+      console.error('[ExpressCart DB] Postgres init error:', err);
+      _pgInitPromise = null;
+      return false;
+    }
+  })();
+
+  return _pgInitPromise;
 }
 
 // --- Local JSON Fallback when DATABASE_URL is not set yet ---
@@ -669,6 +714,10 @@ export async function dbSaveOrder(pass: BackendExitPass): Promise<BackendExitPas
         ${pass.counterResolutionType || null}
       )
       ON CONFLICT (order_id) DO UPDATE SET
+        audit_items = EXCLUDED.audit_items,
+        all_paid_items = EXCLUDED.all_paid_items,
+        security_flags = EXCLUDED.security_flags,
+        actual_physical_items = EXCLUDED.actual_physical_items,
         exit_verified = EXCLUDED.exit_verified,
         requires_counter_checkout = EXCLUDED.requires_counter_checkout,
         verification_mode = EXCLUDED.verification_mode,
@@ -817,22 +866,39 @@ export async function dbVerifyOrderWithPhysicalBill(params: {
   const pgReady = await ensurePostgresSchemaAndSeed();
   if (pgReady) {
     const sql = getSql()!;
-    const rows = await sql`
-      UPDATE orders
-      SET
-        exit_verified = TRUE,
-        requires_counter_checkout = TRUE,
-        verification_mode = 'PHYSICAL_COUNTER_BILL',
-        counter_status = 'CLEARED_PHYSICAL_BILL',
-        physical_bill_ref = ${params.physicalBillRef},
-        counter_resolution_type = ${params.resolutionType},
-        verified_by_staff_id = ${params.staffId},
-        verified_at = NOW()
-      WHERE order_id = ${params.orderId}
-      RETURNING *
-    `;
-    if (rows.length > 0) {
-      return mapRowToExitPass(rows[0]);
+    const existingRows =
+      await sql`SELECT * FROM orders WHERE order_id = ${params.orderId} LIMIT 1`;
+    if (existingRows.length > 0) {
+      const existing = existingRows[0];
+      const shouldRefund =
+        params.resolutionType === 'COUNTER_FULL_REBILL_REFUND' &&
+        !existing.requires_counter_checkout &&
+        existing.payment_method !== 'Pay at Counter' &&
+        existing.counter_status !== 'CLEARED_PHYSICAL_BILL';
+      if (shouldRefund && existing.customer_phone) {
+        await sql`
+          UPDATE users
+          SET wallet_balance = wallet_balance + ${Number(existing.total_price) || 0}
+          WHERE phone = ${existing.customer_phone}
+        `;
+      }
+      const rows = await sql`
+        UPDATE orders
+        SET
+          exit_verified = TRUE,
+          requires_counter_checkout = TRUE,
+          verification_mode = 'PHYSICAL_COUNTER_BILL',
+          counter_status = 'CLEARED_PHYSICAL_BILL',
+          physical_bill_ref = ${params.physicalBillRef},
+          counter_resolution_type = ${params.resolutionType},
+          verified_by_staff_id = ${params.staffId},
+          verified_at = NOW()
+        WHERE order_id = ${params.orderId}
+        RETURNING *
+      `;
+      if (rows.length > 0) {
+        return mapRowToExitPass(rows[0]);
+      }
     }
   }
   const local = loadLocalDb();

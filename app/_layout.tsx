@@ -1,21 +1,17 @@
 import React, { useMemo } from 'react';
-import { View, StyleSheet, Platform, TouchableOpacity } from 'react-native';
+import { View, StyleSheet, Platform } from 'react-native';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { Moon, Sun } from 'lucide-react-native';
 import { useCartStore } from '../store/useCartStore';
 import {
   ThemeColors,
   getThemeColors,
   FONTS,
   TYPOGRAPHY,
-  ICON,
-  TOUCH_TARGET,
 } from '../theme/tokens';
 
 export default function RootLayout() {
   const isDarkMode = useCartStore((s) => s.isDarkMode);
-  const toggleDarkMode = useCartStore((s) => s.toggleDarkMode);
   const COLORS = getThemeColors(isDarkMode);
   const styles = useMemo(() => createStyles(COLORS), [COLORS]);
 
@@ -37,31 +33,6 @@ export default function RootLayout() {
             },
             headerShadowVisible: false,
             contentStyle: { backgroundColor: COLORS.background },
-            headerRight: () => (
-              <TouchableOpacity
-                style={styles.headerThemeBtn}
-                onPress={toggleDarkMode}
-                activeOpacity={0.7}
-                accessibilityRole="button"
-                accessibilityLabel={
-                  isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'
-                }
-              >
-                {isDarkMode ? (
-                  <Sun
-                    size={ICON.size}
-                    color={COLORS.textPrimary}
-                    strokeWidth={ICON.strokeWidth}
-                  />
-                ) : (
-                  <Moon
-                    size={ICON.size}
-                    color={COLORS.textPrimary}
-                    strokeWidth={ICON.strokeWidth}
-                  />
-                )}
-              </TouchableOpacity>
-            ),
           }}
         >
           <Stack.Screen
@@ -140,12 +111,5 @@ const createStyles = (COLORS: ThemeColors) =>
             borderColor: COLORS.divider,
           }
         : {}),
-    },
-    headerThemeBtn: {
-      width: TOUCH_TARGET.min,
-      height: TOUCH_TARGET.min,
-      alignItems: 'center',
-      justifyContent: 'center',
-      marginRight: 8,
     },
   });

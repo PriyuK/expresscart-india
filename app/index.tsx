@@ -287,32 +287,6 @@ export default function LandingScreen() {
         <View style={styles.headerRightActions}>
           <TouchableOpacity
             style={styles.profileTouchTarget}
-            onPress={toggleDarkMode}
-            activeOpacity={0.7}
-            accessibilityRole="button"
-            accessibilityLabel={
-              isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'
-            }
-          >
-            <View style={styles.profileCircle}>
-              {isDarkMode ? (
-                <Sun
-                  size={ICON.size}
-                  color={COLORS.text}
-                  strokeWidth={ICON.strokeWidth}
-                />
-              ) : (
-                <Moon
-                  size={ICON.size}
-                  color={COLORS.text}
-                  strokeWidth={ICON.strokeWidth}
-                />
-              )}
-            </View>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.profileTouchTarget}
             onPress={() => setShowProfileMenu(true)}
             activeOpacity={0.7}
             accessibilityRole="button"
